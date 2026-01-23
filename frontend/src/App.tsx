@@ -8,6 +8,7 @@ import GoogleDrivePicker from './components/GoogleDrivePicker';
 import GoogleSignIn from './components/GoogleSignIn';
 import ServerControl from './components/ServerControl';
 import ImageProgressList from './components/ImageProgressList';
+import CameraCapture from './components/CameraCapture';
 import { useAuth } from './contexts/AuthContext';
 
 interface ProcessedItem {
@@ -99,6 +100,7 @@ function App() {
   const [progressInterval, setProgressInterval] = useState<NodeJS.Timeout | null>(null);
   const [googleDriveFiles, setGoogleDriveFiles] = useState<Array<{fileId: string; filename: string; accessToken: string}>>([]);
   const [uploadSource, setUploadSource] = useState<'local' | 'google'>('local');
+  const [showCameraMode, setShowCameraMode] = useState(false);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     setFiles((prev: File[]) => [...prev, ...acceptedFiles]);
@@ -564,6 +566,12 @@ function App() {
             <div className="flex items-center gap-4">
               <GoogleSignIn />
               <button
+                onClick={() => setShowCameraMode(true)}
+                className="bg-green-600 text-white py-2 px-6 rounded-md font-medium hover:bg-green-700 transition-colors"
+              >
+                📷 Camera Mode
+              </button>
+              <button
                 onClick={() => setShowHistory(!showHistory)}
                 className="bg-gray-600 text-white py-2 px-6 rounded-md font-medium hover:bg-gray-700 transition-colors"
               >
@@ -572,6 +580,15 @@ function App() {
             </div>
           </div>
         </header>
+
+        {/* Camera Mode Overlay */}
+        {showCameraMode && (
+          <CameraCapture
+            initialBoxId={boxId}
+            onExit={() => setShowCameraMode(false)}
+            onBatchComplete={loadBatchHistory}
+          />
+        )}
 
         {showHistory ? (
           <BatchHistory
