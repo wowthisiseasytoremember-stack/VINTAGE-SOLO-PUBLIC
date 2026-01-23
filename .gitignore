@@ -1,0 +1,22 @@
+
+# Server Status File
+.server_status
+
+# System files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode
+.idea
+.cursor
+
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/

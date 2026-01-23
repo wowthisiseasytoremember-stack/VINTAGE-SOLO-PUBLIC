@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env  # Change this to your global .env path if needed, e.g., - ${HOME}/.env or - C:/path/to/your/.env
+    environment:
+      - MAX_IMAGES_PER_BATCH=${MAX_IMAGES_PER_BATCH:-200}
+      - STORAGE_PATH=/app/storage
+      - EXPORTS_PATH=/app/exports
+    volumes:
+      - ./backend/storage:/app/storage
+      - ./backend/exports:/app/exports
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
