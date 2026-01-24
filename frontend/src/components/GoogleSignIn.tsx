@@ -8,7 +8,7 @@ declare global {
 }
 
 const GoogleSignIn: React.FC = () => {
-  const { signIn, signOut, user, isAuthenticated } = useAuth();
+  const { signInWithGoogle: signIn, signOut, user, isAuthenticated } = useAuth();
   const [isLoaded, setIsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -19,7 +19,7 @@ const GoogleSignIn: React.FC = () => {
     const handleCredentialResponse = async (response: any) => {
       try {
         setError(null);
-        await signIn(response.credential);
+        await signIn();
       } catch (err: any) {
         setError(err.message || 'Failed to sign in');
         console.error('Sign in error:', err);
@@ -51,7 +51,7 @@ const GoogleSignIn: React.FC = () => {
   const handleCredentialResponse = async (response: any) => {
     try {
       setError(null);
-      await signIn(response.credential);
+      await signIn();
     } catch (err: any) {
       setError(err.message || 'Failed to sign in');
       console.error('Sign in error:', err);
@@ -77,16 +77,16 @@ const GoogleSignIn: React.FC = () => {
   if (isAuthenticated && user) {
     return (
       <div className="flex items-center gap-3">
-        {user.picture && (
+        {user.photoURL && (
           <img
-            src={user.picture}
-            alt={user.name || user.email}
+            src={user.photoURL}
+            alt={user.displayName || user.email || ''}
             className="w-8 h-8 rounded-full"
           />
         )}
         <div className="flex flex-col">
           <span className="text-sm font-medium text-gray-700">
-            {user.name || user.email}
+            {user.displayName || user.email}
           </span>
           <button
             onClick={signOut}

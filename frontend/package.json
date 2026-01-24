@@ -5,6 +5,8 @@
   "dependencies": {
     "autoprefixer": "^10.4.16",
     "axios": "^1.6.2",
+    "firebase": "^12.8.0",
+    "idb": "^8.0.3",
     "postcss": "^8.4.32",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
@@ -36,11 +38,14 @@
       "last 1 safari version"
     ]
   },
-  "proxy": "http://localhost:8000",
   "devDependencies": {
+    "@types/jsdom": "^27.0.0",
+    "@types/node": "^16.11.7",
     "@types/react": "^18.3.27",
     "@types/react-dom": "^18.3.7",
-    "@types/node": "^16.11.7",
-    "@types/react-dropzone": "^5.1.0"
+    "@types/react-dropzone": "^5.1.0",
+    "fake-indexeddb": "^6.2.5",
+    "jsdom": "^27.4.0",
+    "ts-node": "^10.9.2"
   }
 }

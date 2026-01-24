@@ -4,11 +4,9 @@ const ServerControl: React.FC = () => {
   const [copied, setCopied] = useState<string | null>(null);
 
   const restartCommands = [
-    { label: 'Backend', command: 'cd "C:\\Users\\wowth\\projects\\test from PRD\\backend"; python main.py' },
-    { label: 'Backend (Kill & Start)', command: '$port = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue; if ($port) { Stop-Process -Id $port.OwningProcess -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2 }; cd "C:\\Users\\wowth\\projects\\test from PRD\\backend"; python main.py' },
-    { label: 'Frontend', command: 'cd "C:\\Users\\wowth\\projects\\test from PRD\\frontend"; npm start' },
-    { label: 'Both (PowerShell)', command: '$port = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue; if ($port) { Stop-Process -Id $port.OwningProcess -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2 }; cd "C:\\Users\\wowth\\projects\\test from PRD\\backend"; Start-Process powershell -ArgumentList "-NoExit", "-Command", "python main.py" -WindowStyle Minimized; Start-Sleep -Seconds 1; cd "C:\\Users\\wowth\\projects\\test from PRD\\frontend"; Start-Process powershell -ArgumentList "-NoExit", "-Command", "npm start"' },
-    { label: 'Both (Script)', command: 'cd "C:\\Users\\wowth\\projects\\test from PRD"; .\\start-local.ps1' }
+    { label: 'Frontend', command: 'npm start' },
+    { label: 'Firebase Functions', command: 'firebase emulators:start' },
+    { label: 'Deploy Rules', command: 'firebase deploy --only firestore:rules' }
   ];
 
   const copyToClipboard = (text: string, label: string) => {

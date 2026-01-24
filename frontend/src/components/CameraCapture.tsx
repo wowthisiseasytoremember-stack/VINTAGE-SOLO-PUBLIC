@@ -1,18 +1,13 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import { saveItem, saveBatch } from '../services/db';
 
 // Auto-detect API URL based on environment
 const getApiUrl = () => {
-  if (process.env.REACT_APP_API_URL) {
-    return process.env.REACT_APP_API_URL;
-  }
-  if (process.env.NODE_ENV === 'production') {
-    const hostname = window.location.hostname;
-    if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
-      return `http://${hostname}:8000`;
-    }
-  }
-  return 'http://localhost:8000';
+  if (process.env.REACT_APP_API_URL) return process.env.REACT_APP_API_URL;
+  const protocol = window.location.protocol;
+  const hostname = window.location.hostname;
+  return `${protocol}//${hostname}:8000`;
 };
 
 const API_URL = getApiUrl();
@@ -21,6 +16,7 @@ interface CameraCaptureProps {
   initialBoxId?: string;
   onExit: () => void;
   onBatchComplete?: () => void;
+  standalone?: boolean;
 }
 
 interface QueueItem {
@@ -31,363 +27,255 @@ interface QueueItem {
   error?: string;
 }
 
-const CameraCapture: React.FC<CameraCaptureProps> = ({ initialBoxId = '', onExit, onBatchComplete }) => {
+const CameraCapture: React.FC<CameraCaptureProps> = ({ initialBoxId = '', onExit, onBatchComplete, standalone = true }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   
   const [boxId, setBoxId] = useState(initialBoxId);
-  const [batchId, setBatchId] = useState<string | null>(null);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [cameraError, setCameraError] = useState<string | null>(null);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  
+  // Batch State
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [isCapturing, setIsCapturing] = useState(false);
-  
-  // Queue statistics
-  const queuedCount = queue.filter(q => q.status === 'queued' || q.status === 'uploading').length;
-  const processingCount = queue.filter(q => q.status === 'processing').length;
-  const completedCount = queue.filter(q => q.status === 'completed').length;
-  const failedCount = queue.filter(q => q.status === 'failed').length;
+  const [lastPreview, setLastPreview] = useState<string | null>(null);
+  const [showReview, setShowReview] = useState(false);
+  const [selectedForDelete, setSelectedForDelete] = useState<Set<string>>(new Set());
+  const [isProcessingBatch, setIsProcessingBatch] = useState(false);
 
-  // Start camera stream
   const startCamera = useCallback(async () => {
     try {
       setCameraError(null);
-      
-      // Stop any existing stream
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setCameraError('Camera not supported. Secure connection (HTTPS) required.');
+        return;
       }
       
-      const constraints: MediaStreamConstraints = {
-        video: {
-          facingMode: facingMode,
-          width: { ideal: 1920 },
-          height: { ideal: 1080 }
-        },
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false
-      };
-      
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      });
       streamRef.current = stream;
-      
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-        setIsStreaming(true);
       }
     } catch (err: any) {
-      console.error('Camera error:', err);
-      if (err.name === 'NotAllowedError') {
-        setCameraError('Camera permission denied. Please allow camera access and try again.');
-      } else if (err.name === 'NotFoundError') {
-        setCameraError('No camera found. Please connect a camera and try again.');
-      } else {
-        setCameraError(`Failed to access camera: ${err.message}`);
-      }
-      setIsStreaming(false);
+      setCameraError(err.name === 'NotAllowedError' ? 'Camera permission denied.' : `Camera access failed: ${err.message}`);
     }
   }, [facingMode]);
 
-  // Initialize batch on mount
   useEffect(() => {
-    const createBatch = async () => {
-      try {
-        const response = await axios.post(`${API_URL}/api/create-batch`, {
-          box_id: boxId || 'CAMERA-SESSION'
-        });
-        setBatchId(response.data.batch_id);
-      } catch (error) {
-        console.error('Failed to create batch:', error);
-      }
-    };
-    createBatch();
-  }, []);
+    if (!showReview) startCamera();
+    return () => streamRef.current?.getTracks().forEach(track => track.stop());
+  }, [startCamera, showReview]);
 
-  // Start camera on mount
-  useEffect(() => {
-    startCamera();
-    
-    return () => {
-      // Cleanup: stop camera stream
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-      }
-    };
-  }, [startCamera]);
-
-  // Switch camera
-  const switchCamera = () => {
-    setFacingMode(prev => prev === 'user' ? 'environment' : 'user');
-  };
-
-  // Capture photo
   const capturePhoto = useCallback(async () => {
     if (!videoRef.current || !canvasRef.current || isCapturing) return;
-    
     setIsCapturing(true);
     
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    
-    // Set canvas size to match video
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-    
-    // Draw video frame to canvas
     const ctx = canvas.getContext('2d');
-    if (!ctx) {
-      setIsCapturing(false);
-      return;
-    }
+    if (!ctx) { setIsCapturing(false); return; }
     
     ctx.drawImage(video, 0, 0);
-    
-    // Convert to blob
     canvas.toBlob(async (blob) => {
-      if (!blob) {
-        setIsCapturing(false);
-        return;
-      }
+      if (!blob) { setIsCapturing(false); return; }
       
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const filename = `capture_${timestamp}.jpg`;
       const itemId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
       
-      // Add to queue
-      const newItem: QueueItem = {
-        id: itemId,
-        file: blob,
-        filename,
-        status: 'queued'
-      };
-      
+      const newItem: QueueItem = { id: itemId, file: blob, filename, status: 'queued' };
       setQueue(prev => [...prev, newItem]);
+      setLastPreview(URL.createObjectURL(blob));
       
-      // Haptic feedback (if available)
-      if (navigator.vibrate) {
-        navigator.vibrate(50);
-      }
-      
-      // Play capture sound (optional)
-      try {
-        const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2teleWYXAHCZi3tJLjFtkpmWn1YyKn2SgXx1TShPioVwakc6T3mFhYOAXDpLhomCgn9INGCThHByYTs/bYB6eHJWRlxydG51cFpdWWFnbGxjU15dTllya3JkQVBhW15lb181TGlpam1ufmNWXGJnamtwbGVfXmpnamxmYWBhZGhrbGljZ2VnamtubWpoaGlra21ta2lpamprbW5tamhoaWprbGxramloaGprbGxsamloaGlqampqamlpa2tqamppampqaWpqamlpamlqaWppampqampqaWpqaWlpampqampqamppampqamppampqampqamppamlqampqampqampqamppaWpqamppampqamppaWlpampqampqampqampqampqamtqa2xrbGxraWlpaWppamlpaWpqampqampqaWpqampqamppaWpqag==');
-        audio.volume = 0.3;
-        audio.play().catch(() => {}); // Ignore errors
-      } catch (e) {
-        // Audio not supported
-      }
-      
-      // Upload in background
-      uploadItem(newItem);
-      
+      if (navigator.vibrate) navigator.vibrate(50);
       setIsCapturing(false);
     }, 'image/jpeg', 0.85);
-  }, [batchId, boxId, isCapturing]);
+  }, [isCapturing]);
 
-  // Upload item to server
-  const uploadItem = async (item: QueueItem) => {
-    // Update status to uploading
-    setQueue(prev => prev.map(q => 
-      q.id === item.id ? { ...q, status: 'uploading' as const } : q
-    ));
+  const handleFinishSession = async () => {
+    if (queue.length === 0) {
+      onExit();
+      return;
+    }
     
+    setIsProcessingBatch(true);
+
     try {
-      const formData = new FormData();
-      formData.append('file', item.file, item.filename);
-      formData.append('box_id', boxId || 'CAMERA-SESSION');
-      if (batchId) {
-        formData.append('batch_id', batchId);
+      // Create a new batch for this session
+      const newBatchId = `local-cam-${Date.now()}`;
+      
+      // Save items to IndexedDB
+      for (const item of queue) {
+        const reader = new FileReader();
+        const base64Promise = new Promise<string>((resolve) => {
+          reader.onload = () => resolve((reader.result as string).split(',')[1]);
+          reader.readAsDataURL(item.file);
+        });
+        const base64 = await base64Promise;
+
+        await saveItem({
+          batch_id: newBatchId,
+          filename: item.filename,
+          box_id: boxId || 'CAMERA-SESSION',
+          title: '', type: 'other', year: '', notes: '', confidence: '',
+          processed_at: new Date().toISOString(),
+          image_data: base64,
+          status: 'pending' // App.tsx will pick this up
+        });
       }
-      
-      await axios.post(`${API_URL}/api/process-item`, formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-        timeout: 60000,
+
+      // Initial Batch Record
+      await saveBatch({
+        batch_id: newBatchId,
+        box_id: boxId || 'CAMERA-SESSION',
+        total_images: queue.length,
+        processed: 0,
+        failed: 0,
+        created_at: new Date().toISOString(),
+        status: 'pending'
       });
-      
-      // Update status to processing (server is now processing with AI)
-      setQueue(prev => prev.map(q => 
-        q.id === item.id ? { ...q, status: 'processing' as const } : q
-      ));
-      
-      // Poll for completion (simplified - just mark as completed after upload success)
-      // In a real implementation, you'd poll /api/batches/{id}/items/status
-      setTimeout(() => {
-        setQueue(prev => prev.map(q => 
-          q.id === item.id ? { ...q, status: 'completed' as const } : q
-        ));
-      }, 5000); // Assume 5 seconds for AI processing
-      
-    } catch (error: any) {
-      console.error('Upload failed:', error);
-      setQueue(prev => prev.map(q => 
-        q.id === item.id ? { 
-          ...q, 
-          status: 'failed' as const, 
-          error: error.response?.data?.detail || error.message 
-        } : q
-      ));
+
+      if (onBatchComplete) onBatchComplete(); // Triggers App.tsx to start processing
+      onExit();
+    } catch (err) {
+      console.error("Batch save failed:", err);
+      // Even if specific save fails, try to exit
+      onExit();
     }
   };
 
-  // Handle exit
-  const handleExit = () => {
-    // Stop camera
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-    }
-    
-    // Notify parent of batch completion if items were processed
-    if (completedCount > 0 && onBatchComplete) {
-      onBatchComplete();
-    }
-    
-    onExit();
+  const toggleDelete = (id: string) => {
+    setSelectedForDelete(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   };
+
+  const confirmDelete = () => {
+    setQueue(prev => prev.filter(q => !selectedForDelete.has(q.id)));
+    setSelectedForDelete(new Set());
+    if (queue.length - selectedForDelete.size === 0) setShowReview(false);
+  };
+
+  // ========== STYLES ==========
+  const containerStyle: React.CSSProperties = { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#000', zIndex: 9999, display: 'flex', flexDirection: 'column', fontFamily: 'Inter, system-ui, sans-serif' };
+  const topBarStyle: React.CSSProperties = { position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10, padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', background: 'linear-gradient(to bottom, rgba(0,0,0,0.8), transparent)' };
+  const inputStyle: React.CSSProperties = { backgroundColor: 'rgba(255,255,255,0.15)', color: '#fff', padding: '12px 16px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.3)', fontSize: '16px', fontWeight: 700, width: '180px' };
+  const closeButtonStyle: React.CSSProperties = { width: '48px', height: '48px', backgroundColor: 'rgba(255,255,255,0.15)', color: '#fff', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.3)', fontSize: '24px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' };
+  const videoStyle: React.CSSProperties = { width: '100%', height: '100%', objectFit: 'cover' };
+  const bottomBarStyle: React.CSSProperties = { position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 10, padding: '30px 20px 40px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '20px', background: 'linear-gradient(to top, rgba(0,0,0,0.9), transparent)' };
+  const statsBarStyle: React.CSSProperties = { display: 'flex', gap: '16px', backgroundColor: 'rgba(0,0,0,0.6)', padding: '10px 20px', borderRadius: '30px', border: '1px solid rgba(255,255,255,0.2)' };
+  const shutterButtonStyle: React.CSSProperties = { width: '80px', height: '80px', borderRadius: '50%', border: '6px solid #fff', backgroundColor: 'transparent', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' };
+  const exitButtonStyle: React.CSSProperties = { width: '100%', maxWidth: '280px', padding: '16px', borderRadius: '20px', border: queue.length > 0 ? '1px solid rgba(99,102,241,0.5)' : '1px solid rgba(255,255,255,0.2)', backgroundColor: queue.length > 0 ? '#4f46e5' : 'rgba(255,255,255,0.1)', color: queue.length > 0 ? '#fff' : 'rgba(255,255,255,0.5)', fontSize: '12px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '2px', cursor: 'pointer' };
 
   return (
-    <div className="fixed inset-0 bg-black z-50 flex flex-col">
-      {/* Header Bar */}
-      <div className="bg-gray-900/90 backdrop-blur px-4 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-3 flex-1">
-          <label className="text-gray-400 text-sm whitespace-nowrap">Box ID:</label>
-          <input
-            type="text"
-            value={boxId}
-            onChange={(e) => setBoxId(e.target.value)}
-            placeholder="e.g., BOX-042"
-            className="bg-gray-800 text-white px-3 py-1.5 rounded-md text-sm border border-gray-700 focus:border-blue-500 focus:outline-none flex-1 max-w-xs"
-          />
+    <div style={containerStyle}>
+      <div style={topBarStyle}>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+            <div style={{ width: '8px', height: '8px', backgroundColor: standalone ? '#3b82f6' : '#22c55e', borderRadius: '50%' }} />
+            <span style={{ fontSize: '10px', fontWeight: 900, color: '#fff', textTransform: 'uppercase', letterSpacing: '2px' }}>{standalone ? 'Fast Mode' : 'Live'}</span>
+          </div>
+          <input type="text" value={boxId} onChange={(e) => setBoxId(e.target.value)} placeholder="BOX-ID" style={inputStyle} />
         </div>
-        <button
-          onClick={handleExit}
-          className="bg-red-600 hover:bg-red-700 text-white px-4 py-1.5 rounded-md text-sm font-medium transition-colors"
-        >
-          Exit
-        </button>
+        {!isProcessingBatch && (
+          <button onClick={onExit} style={closeButtonStyle}>✕</button>
+        )}
       </div>
-      
-      {/* Camera Viewfinder */}
-      <div className="flex-1 relative overflow-hidden">
+
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 1 }}>
         {cameraError ? (
-          <div className="absolute inset-0 flex items-center justify-center p-6">
-            <div className="bg-red-900/80 text-white p-6 rounded-lg text-center max-w-md">
-              <div className="text-4xl mb-4">📷</div>
-              <p className="mb-4">{cameraError}</p>
-              <button
-                onClick={startCamera}
-                className="bg-white text-red-900 px-4 py-2 rounded-md font-medium hover:bg-gray-100 transition-colors"
-              >
-                Try Again
-              </button>
-            </div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '40px', textAlign: 'center' }}>
+            <div><p style={{ color: '#fff', fontSize: '18px' }}>{cameraError}</p></div>
           </div>
         ) : (
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            className="w-full h-full object-cover"
-          />
+          <video ref={videoRef} autoPlay playsInline muted style={videoStyle} />
         )}
-        
-        {/* Hidden canvas for capture */}
-        <canvas ref={canvasRef} className="hidden" />
-        
-        {/* Camera switch button */}
-        {isStreaming && (
-          <button
-            onClick={switchCamera}
-            className="absolute top-4 right-4 bg-black/50 hover:bg-black/70 text-white p-3 rounded-full transition-colors"
-            title="Switch Camera"
-          >
-            🔄
-          </button>
-        )}
-        
-        {/* Capture flash effect */}
-        {isCapturing && (
-          <div className="absolute inset-0 bg-white animate-flash pointer-events-none" />
-        )}
+        <canvas ref={canvasRef} style={{ display: 'none' }} />
       </div>
-      
-      {/* Status Bar */}
-      <div className="bg-gray-900/90 backdrop-blur px-4 py-3">
-        <div className="flex items-center justify-between text-sm mb-3">
-          <div className="flex gap-4">
-            <span className="text-yellow-400">
-              📸 Queued: {queuedCount}
-            </span>
-            <span className="text-blue-400">
-              ⏳ Processing: {processingCount}
-            </span>
-            <span className="text-green-400">
-              ✅ Completed: {completedCount}
-            </span>
-            {failedCount > 0 && (
-              <span className="text-red-400">
-                ❌ Failed: {failedCount}
-              </span>
+
+      {/* REVIEW OVERLAY */}
+      {showReview && (
+        <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20, backgroundColor: '#000', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ padding: '20px', borderBottom: '1px solid #333', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <h3 style={{ margin: 0, color: '#fff', fontFamily: 'Outfit, sans-serif' }}>Review ({queue.length})</h3>
+            <button onClick={() => setShowReview(false)} style={{ background: 'none', border: 'none', color: '#3b82f6', fontSize: '16px', fontWeight: 'bold', cursor: 'pointer' }}>Resume Camera</button>
+          </div>
+          <div style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+            {queue.map(item => (
+              <div 
+                key={item.id} 
+                onClick={() => toggleDelete(item.id)}
+                style={{ 
+                  position: 'relative', 
+                  aspectRatio: '1', 
+                  borderRadius: '8px', 
+                  overflow: 'hidden', 
+                  border: selectedForDelete.has(item.id) ? '3px solid #ef4444' : '1px solid #333',
+                  opacity: selectedForDelete.has(item.id) ? 0.6 : 1
+                }}
+              >
+                <img src={URL.createObjectURL(item.file)} alt="capture" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                {selectedForDelete.has(item.id) && (
+                  <div style={{ position: 'absolute', top: '4px', right: '4px', background: '#ef4444', borderRadius: '50%', width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', color: 'white' }}>✕</div>
+                )}
+              </div>
+            ))}
+          </div>
+          <div style={{ padding: '20px', borderTop: '1px solid #333', display: 'flex', gap: '12px' }}>
+            {selectedForDelete.size > 0 ? (
+              <button 
+                onClick={confirmDelete}
+                style={{ flex: 1, padding: '16px', background: '#ef4444', color: 'white', border: 'none', borderRadius: '12px', fontWeight: 'bold', fontSize: '16px' }}
+              >
+                Delete Selected ({selectedForDelete.size})
+              </button>
+            ) : (
+              <button 
+                onClick={handleFinishSession}
+                disabled={isProcessingBatch}
+                style={{ flex: 1, padding: '16px', background: '#22c55e', color: 'white', border: 'none', borderRadius: '12px', fontWeight: 'bold', fontSize: '16px', opacity: isProcessingBatch ? 0.5 : 1 }}
+              >
+                {isProcessingBatch ? 'Saving...' : `✨ Identify ${queue.length} Items`}
+              </button>
             )}
           </div>
-          <span className="text-gray-400">
-            Total: {queue.length}
-          </span>
-        </div>
-        
-        {/* Mini progress bar */}
-        {queue.length > 0 && (
-          <div className="w-full bg-gray-700 rounded-full h-1.5 mb-3">
-            <div 
-              className="bg-green-500 h-1.5 rounded-full transition-all duration-300"
-              style={{ width: `${(completedCount / queue.length) * 100}%` }}
-            />
-          </div>
-        )}
-      </div>
-      
-      {/* Capture Button */}
-      <div className="bg-gray-900 px-4 py-6 flex justify-center">
-        <button
-          onClick={capturePhoto}
-          disabled={!isStreaming || !boxId.trim() || isCapturing}
-          className={`
-            w-20 h-20 rounded-full border-4 border-white flex items-center justify-center
-            transition-all duration-150 transform
-            ${isStreaming && boxId.trim() && !isCapturing
-              ? 'bg-white hover:bg-gray-200 active:scale-95 cursor-pointer'
-              : 'bg-gray-600 cursor-not-allowed opacity-50'
-            }
-          `}
-          title={!boxId.trim() ? 'Enter Box ID first' : 'Capture Photo'}
-        >
-          <div className={`w-16 h-16 rounded-full ${isStreaming && boxId.trim() ? 'bg-red-500' : 'bg-gray-500'}`} />
-        </button>
-      </div>
-      
-      {/* Instructions */}
-      {!boxId.trim() && (
-        <div className="absolute bottom-32 left-0 right-0 text-center">
-          <span className="bg-yellow-500 text-black px-4 py-2 rounded-lg text-sm font-medium">
-            Enter a Box ID to start capturing
-          </span>
         </div>
       )}
-      
-      {/* CSS for flash animation */}
-      <style>{`
-        @keyframes flash {
-          0% { opacity: 0.8; }
-          100% { opacity: 0; }
-        }
-        .animate-flash {
-          animation: flash 0.15s ease-out;
-        }
-      `}</style>
+
+      {/* VIEWFINDER UI (Hidden when reviewing) */}
+      {!showReview && (
+        <div style={bottomBarStyle}>
+          <div style={statsBarStyle}>
+            <div style={{ color: '#fff', fontSize: '14px', fontWeight: 700 }}>CAPTURED: {queue.length}</div>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '30px', width: '100%' }}>
+            <div 
+              onClick={() => queue.length > 0 && setShowReview(true)}
+              style={{ width: '50px', height: '50px', borderRadius: '50%', backgroundColor: 'rgba(255,255,255,0.15)', overflow: 'hidden', border: '2px solid #fff', cursor: 'pointer' }}
+            >
+              {lastPreview && <img src={lastPreview} alt="Preview" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />}
+            </div>
+            <button onClick={capturePhoto} disabled={isCapturing} style={shutterButtonStyle}>
+              <div style={{ width: '60px', height: '60px', borderRadius: '50%', backgroundColor: '#fff', transform: isCapturing ? 'scale(0.8)' : 'scale(1)', transition: 'transform 0.1s' }} />
+            </button>
+            <button onClick={() => setFacingMode(prev => prev === 'user' ? 'environment' : 'user')} style={{ width: '50px', height: '50px', borderRadius: '50%', backgroundColor: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.3)', color: '#fff' }}>🔄</button>
+          </div>
+
+          <button onClick={queue.length > 0 ? () => setShowReview(true) : onExit} style={exitButtonStyle}>
+            {queue.length > 0 ? `Review & Process (${queue.length})` : 'Exit Viewfinder'}
+          </button>
+        </div>
+      )}
     </div>
   );
 };

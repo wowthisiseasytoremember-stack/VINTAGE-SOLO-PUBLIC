@@ -1,102 +1,104 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import axios from 'axios';
-
-interface User {
-  id: number;
-  google_id: string;
-  email: string;
-  name?: string;
-  picture?: string;
-}
+import { 
+  User, 
+  signInWithPopup, 
+  signOut as firebaseSignOut,
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { auth, googleProvider, isFirebaseConfigured } from '../services/firebase';
 
 interface AuthContextType {
   user: User | null;
-  token: string | null;
   loading: boolean;
-  signIn: (googleToken: string) => Promise<void>;
-  signOut: () => void;
+  isConfigured: boolean;
   isAuthenticated: boolean;
+  signInWithGoogle: () => Promise<void>;
+  signOut: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+interface AuthProviderProps {
+  children: ReactNode;
+}
 
-export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+export function AuthProvider({ children }: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const isConfigured = isFirebaseConfigured();
 
   useEffect(() => {
-    // Check for stored token on mount
-    const storedToken = localStorage.getItem('auth_token');
-    if (storedToken) {
-      setToken(storedToken);
-      // Verify token and get user info
-      verifyToken(storedToken);
-    } else {
+    if (!isConfigured || !auth) {
       setLoading(false);
+      return;
     }
-  }, []);
 
-  const verifyToken = async (authToken: string) => {
+    // Subscribe to auth state changes
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      setUser(firebaseUser);
+      setLoading(false);
+      
+      if (firebaseUser) {
+        console.log('🔐 User signed in:', firebaseUser.email);
+      } else {
+        console.log('🔓 User signed out');
+      }
+    });
+
+    return () => unsubscribe();
+  }, [isConfigured]);
+
+  const signInWithGoogle = async () => {
+    if (!auth || !googleProvider) {
+      console.error('Firebase Auth not initialized');
+      return;
+    }
+
     try {
-      const response = await axios.get(`${API_URL}/api/auth/me`, {
-        headers: {
-          Authorization: `Bearer ${authToken}`
-        }
-      });
-      setUser(response.data);
-      setToken(authToken);
-    } catch (error) {
-      // Token invalid, clear it (but don't block app access)
-      localStorage.removeItem('auth_token');
-      setToken(null);
-      setUser(null);
+      setLoading(true);
+      await signInWithPopup(auth, googleProvider);
+    } catch (error: any) {
+      console.error('Sign-in error:', error);
+      // Handle popup closed by user
+      if (error.code !== 'auth/popup-closed-by-user') {
+        throw error;
+      }
     } finally {
       setLoading(false);
     }
   };
 
-  const signIn = async (googleToken: string) => {
+  const signOut = async () => {
+    if (!auth) return;
+    
     try {
-      const response = await axios.post(`${API_URL}/api/auth/google`, {
-        token: googleToken
-      });
-      
-      const { access_token, user: userData } = response.data;
-      
-      localStorage.setItem('auth_token', access_token);
-      setToken(access_token);
-      setUser(userData);
-    } catch (error: any) {
-      console.error('Sign in error:', error);
-      throw new Error(error.response?.data?.detail || 'Failed to sign in');
+      await firebaseSignOut(auth);
+    } catch (error) {
+      console.error('Sign-out error:', error);
+      throw error;
     }
-  };
-
-  const signOut = () => {
-    localStorage.removeItem('auth_token');
-    setToken(null);
-    setUser(null);
   };
 
   const value: AuthContextType = {
     user,
-    token,
     loading,
-    signIn,
-    signOut,
-    isAuthenticated: !!user && !!token
+    isConfigured,
+    isAuthenticated: !!user,
+    signInWithGoogle,
+    signOut
   };
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-};
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
 
-export const useAuth = () => {
+export function useAuth(): AuthContextType {
   const context = useContext(AuthContext);
   if (context === undefined) {
     throw new Error('useAuth must be used within an AuthProvider');
   }
   return context;
-};
+}
