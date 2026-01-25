@@ -24,7 +24,6 @@ import {
   syncItemToCloud, 
   syncInventoryToCloud,
   deleteItemFromCloud,
-  deleteBatchFromCloud,
   loadAllFromCloud,
   syncAllToCloud,
   retryConnection
@@ -103,84 +102,6 @@ function App() {
     claude: parseInt(localStorage.getItem('usage_claude') || '0')
   });
 
-  // Debounced Save for Dev Notes
-  const saveDevNotes = useCallback(async (notes: string) => {
-      localStorage.setItem('dev_notes', notes);
-      if (user) {
-          await saveUserSettings(user.uid, { dev_notes: notes } as any);
-      }
-  }, [user]);
-
-  // Keep usage in sync with localStorage
-  useEffect(() => {
-    localStorage.setItem('usage_gemini', aiUsage.gemini.toString());
-    localStorage.setItem('usage_openai', aiUsage.openai.toString());
-    localStorage.setItem('usage_claude', aiUsage.claude.toString());
-  }, [aiUsage]);
-
-  // UX Hardening: Back Button Trap
-  useEffect(() => {
-    const handlePopState = (event: PopStateEvent) => {
-      event.preventDefault();
-      // If we are in process, or just generally to prevent exit
-      if (currentView !== 'home') {
-          setCurrentView('home');
-          window.history.pushState(null, '', window.location.pathname);
-      } else {
-          // Toast warning
-          showToast("Press Back again to Exit", 2000);
-          // Allow exit if pressed again quickly? Hard to implement perfectly in browser PWA without native wrappers
-          // But pushing state prevents immediate exit
-          window.history.pushState(null, '', window.location.pathname); 
-      }
-    };
-    
-    window.history.pushState(null, '', window.location.pathname);
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
-  }, [currentView]);
-
-  // SW Update Listener
-  useEffect(() => {
-    const handleSWUpdate = () => {
-      setToastMessage("✨ New Update Available! Reloading...");
-      setTimeout(() => window.location.reload(), 2000); // Auto-reload for mom
-    };
-    window.addEventListener('sw-update', handleSWUpdate);
-    return () => window.removeEventListener('sw-update', handleSWUpdate);
-  }, []);
-
-  // Sync-on-Focus (Magic Sync)
-  useEffect(() => {
-    const handleFocus = async () => {
-      // Only sync if we are relatively idle and logged in
-      if (!processing && user && appStatus === 'ready') {
-        console.log("👁️ App focused - Checking for magic sync...");
-        setAppStatus('syncing'); 
-        // Quick pull of latest data
-        await loadBatchHistory(10); 
-        // We could also do a full cloud pull but that's heavy. 
-        // Let's assume firestoreSync 'loadAllFromCloud' is precise enough or we just trust realtime listeners if we had them (we don't yet).
-        // For now, let's just re-run the cloud merge light version if implemented, or just 'retryConnection' to ensure we are good.
-        // Actually, let's just re-fetch the history which helps if a new batch was added on another device.
-        const { batches: cloudBatches } = await loadAllFromCloud(user.uid);
-        if (cloudBatches.length > batches.length) {
-            // New stuff found!
-            showToast("✨ Found new items from your other device!");
-            for (const b of cloudBatches) { await saveBatch(b); }
-            loadBatchHistory();
-        }
-        setAppStatus('ready');
-      }
-    };
-    window.addEventListener('focus', handleFocus);
-    return () => window.removeEventListener('focus', handleFocus);
-  }, [user, processing, appStatus, batches.length]);
-
-  const incrementUsage = (provider: AIProvider) => {
-    setAiUsage(prev => ({ ...prev, [provider]: prev[provider] + 1 }));
-  };
-
   const [batchStartTime, setBatchStartTime] = useState<Date | null>(null);
   const [testResults, setTestResults] = useState<TestResult[] | null>(null);
   const [runningTests, setRunningTests] = useState(false);
@@ -190,17 +111,24 @@ function App() {
   const [isDbInitialized, setIsDbInitialized] = useState(false);
   const [dbError, setDbError] = useState(false);
   const [inventoryLastDate, setInventoryLastDate] = useState<string | undefined>(undefined);
-  const [hasMoreInventory, setHasMoreInventory] = useState(true);
   const [inventorySort, setInventorySort] = useState<InventorySortOption>('created_at-desc');
 
   // Helper to show a toast
-  const showToast = (message: string, duration = 3000) => {
+  const showToast = useCallback((message: string, duration = 3000) => {
     setToastMessage(message);
     setTimeout(() => setToastMessage(null), duration);
-  };
+  }, []);
+
+  // Debounced Save for Dev Notes
+  const saveDevNotes = useCallback(async (notes: string) => {
+      localStorage.setItem('dev_notes', notes);
+      if (user) {
+          await saveUserSettings(user.uid, { dev_notes: notes } as any);
+      }
+  }, [user]);
 
   // ========== DATA LOADING HELPERS ==========
-  const loadBatchHistory = async (limit = 10) => {
+  const loadBatchHistory = useCallback(async (limit = 10) => {
     const localBatches = await getBatches(limit);
     const batchesWithThumbs = await Promise.all(localBatches.map(async (b) => {
       const items = await getBatchItems(b.batch_id);
@@ -237,7 +165,173 @@ function App() {
         comps_quote: item.comps_quote
       })));
     }
+  }, [items.length]);
+
+  const loadInventory = useCallback(async (reset = true) => {
+    const limit = 50;
+    const lastDate = reset ? undefined : inventoryLastDate;
+    
+    // Pass sort option to DB
+    const newItems = await getAllInventory(limit, lastDate, inventorySort);
+    
+    if (reset) {
+      setInventory(newItems);
+    } else {
+      setInventory(prev => [...prev, ...newItems]);
+    }
+    
+    if (newItems.length > 0) {
+      const lastItem = newItems[newItems.length - 1];
+      setInventoryLastDate(lastItem.last_seen);
+    }
+  }, [inventoryLastDate, inventorySort]);
+
+  // Keep usage in sync with localStorage
+  useEffect(() => {
+    localStorage.setItem('usage_gemini', aiUsage.gemini.toString());
+    localStorage.setItem('usage_openai', aiUsage.openai.toString());
+    localStorage.setItem('usage_claude', aiUsage.claude.toString());
+  }, [aiUsage]);
+
+  // UX Hardening: Back Button Trap
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      event.preventDefault();
+      // If we are in process, or just generally to prevent exit
+      if (currentView !== 'home') {
+          setCurrentView('home');
+          window.history.pushState(null, '', window.location.pathname);
+      } else {
+          // Toast warning
+          showToast("Press Back again to Exit", 2000);
+          // Allow exit if pressed again quickly? Hard to implement perfectly in browser PWA without native wrappers
+          // But pushing state prevents immediate exit
+          window.history.pushState(null, '', window.location.pathname); 
+      }
+    };
+    
+    window.history.pushState(null, '', window.location.pathname);
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [currentView, showToast]);
+
+  // SW Update Listener
+  useEffect(() => {
+    const handleSWUpdate = () => {
+      showToast("✨ New Update Available! Reloading...", 2000);
+      setTimeout(() => window.location.reload(), 2000); // Auto-reload for mom
+    };
+    window.addEventListener('sw-update', handleSWUpdate);
+    return () => window.removeEventListener('sw-update', handleSWUpdate);
+  }, [showToast]);
+
+  // Sync-on-Focus (Magic Sync)
+  useEffect(() => {
+    const handleFocus = async () => {
+      // Only sync if we are relatively idle and logged in
+      if (!processing && user && appStatus === 'ready') {
+        console.log("👁️ App focused - Checking for magic sync...");
+        
+        // 1. Get current local state accurately
+        const localBatches = await getBatches(10);
+        
+        // 2. Peek at cloud
+        const { batches: cloudBatches } = await loadAllFromCloud(user.uid);
+        
+            // 3. Compare smartly: ONLY notify if we get *genuinely new* stuff from OTHER devices
+            // Note: In a real PWA, we'd check a "deviceId" metadata on the cloud batch.
+            // FIX: If the batch exists locally but maybe with slightly different details, we ignore it.
+            
+            if (cloudBatches.length > localBatches.length) {
+                setAppStatus('syncing'); 
+                let addedCount = 0;
+                const localIds = new Set(localBatches.map(b => b.batch_id));
+
+                for (const b of cloudBatches) { 
+                  if (!localIds.has(b.batch_id)) {
+                    await saveBatch(b); 
+                    addedCount++;
+                  }
+                }
+            
+            // STRICT CHECK: Only show toast if we actually added something new
+            if (addedCount > 0) {
+              showToast(`✨ Synced ${addedCount} new batch${addedCount > 1 ? 'es' : ''} from cloud`);
+              loadBatchHistory();
+            } else {
+              console.log("Sync checked: No new content to merge.");
+            }
+            setAppStatus('ready');
+        }
+      }
+    };
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
+  }, [user, processing, appStatus, loadBatchHistory, showToast]);
+
+  const handleForcePush = async () => {
+    if (!user) {
+      showToast("❌ Please sign in first");
+      return;
+    }
+    setAppStatus('syncing');
+    showToast("📤 Starting Manual Push...");
+    
+    try {
+      const localBatches = await getBatches(500);
+      for (const b of localBatches) {
+        await syncBatchToCloud(user.uid, b);
+        const bItems = await getBatchItems(b.batch_id);
+        for (const item of bItems) {
+          await syncItemToCloud(user.uid, item);
+        }
+      }
+      const localInv = await getAllInventory(1000);
+      for (const item of localInv) {
+        await syncInventoryToCloud(user.uid, item);
+      }
+      showToast("✅ Cloud Push Complete!");
+    } catch (err) {
+      console.error(err);
+      showToast("❌ Push Failed");
+    } finally {
+      setAppStatus('ready');
+    }
   };
+
+  const handleForcePull = async () => {
+    if (!user) {
+      showToast("❌ Please sign in first");
+      return;
+    }
+    setAppStatus('syncing');
+    showToast("📥 Starting Manual Pull...");
+    
+    try {
+      const { batches: cloudBatches, inventory: cloudInv } = await loadAllFromCloud(user.uid);
+      for (const b of cloudBatches) { await saveBatch(b); }
+      for (const item of cloudInv) { await addToInventory(item); }
+      await loadBatchHistory();
+      await loadInventory();
+      showToast(`✅ Pull Complete! (${cloudBatches.length} batches, ${cloudInv.length} items)`);
+    } catch (err) {
+      console.error(err);
+      showToast("❌ Pull Failed");
+    } finally {
+      setAppStatus('ready');
+    }
+  };
+
+  const incrementUsage = (provider: AIProvider) => {
+    setAiUsage(prev => ({ ...prev, [provider]: prev[provider] + 1 }));
+  };
+
+
+
+
+
+  // ========== DATA LOADING HELPERS ==========
+
 
   const loadBatch = async (batchId: string) => {
     const batchItems = await getBatchItems(batchId);
@@ -259,26 +353,7 @@ function App() {
     setCurrentView('home');
   };
 
-  const loadInventory = async (reset = true) => {
-    const limit = 50;
-    const lastDate = reset ? undefined : inventoryLastDate;
-    
-    // Pass sort option to DB
-    const newItems = await getAllInventory(limit, lastDate, inventorySort);
-    
-    if (reset) {
-      setInventory(newItems);
-    } else {
-      setInventory(prev => [...prev, ...newItems]);
-    }
-    
-    if (newItems.length > 0) {
-      const lastItem = newItems[newItems.length - 1];
-      setInventoryLastDate(lastItem.last_seen);
-    }
-    
-    setHasMoreInventory(newItems.length === limit);
-  };
+
 
   const handleInventoryItemClick = async (item: InventoryItem) => {
     const fullItem = await getLatestItemByHash(item.image_hash);
@@ -327,8 +402,19 @@ function App() {
         // Initial Check for incomplete batches
         const incomplete = await getIncompleteBatches();
         if (incomplete.length > 0) {
-          setIncompleteBatch(incomplete[0]);
-          setShowResumePrompt(true);
+          const lastIncomplete = incomplete[0]; // Assuming the first one is the most recent or relevant
+          setIncompleteBatch(lastIncomplete);
+      
+          // LOGIC FIX: Only show resume prompt if this is a "fresh" start
+          // We use sessionStorage which clears when the tab/browser is closed
+          const hasSeenPrompt = sessionStorage.getItem('has_seen_resume_prompt');
+          
+          if (!hasSeenPrompt) {
+            setShowResumePrompt(true);
+            sessionStorage.setItem('has_seen_resume_prompt', 'true');
+          } else {
+            console.log("Skipping resume prompt (already seen this session)");
+          }
         }
         
         // If no user, we're done initializing (local only mode)
@@ -344,7 +430,7 @@ function App() {
       }
     };
     boot();
-  }, []);
+  }, [loadBatchHistory, user]);
 
   // ========== CLOUD SYNC: LOAD SETTINGS & CLOUD DATA ==========
   useEffect(() => {
@@ -423,7 +509,7 @@ function App() {
       }
     };
     loadCloudData();
-  }, [user, keysLoadedFromCloud, isDbInitialized]);
+  }, [user, keysLoadedFromCloud, isDbInitialized, loadBatchHistory, loadInventory, showToast]);
 
 
 
@@ -432,7 +518,7 @@ function App() {
     if (currentView === 'history') loadBatchHistory();
     if (currentView === 'inventory') loadInventory(true);
     if (currentView === 'home') loadBatchHistory(); // Load recent items for dashboard
-  }, [currentView, inventorySort]);
+  }, [currentView, inventorySort, loadBatchHistory, loadInventory]);
 
   // Save boxId to localStorage
   useEffect(() => {
@@ -863,7 +949,8 @@ function App() {
         year: updatedItem.year || '',
         notes: updatedItem.notes || '',
         box_id: updatedItem.box_id,
-        comps_quote: updatedItem.comps_quote
+        comps_quote: updatedItem.comps_quote,
+        saved_comps: updatedItem.saved_comps // Persist detailed comps history
       };
       await updateItem(updatedItem.id, updates);
       
@@ -880,7 +967,8 @@ function App() {
           confidence: updatedItem.confidence,
           processed_at: updatedItem.processed_at,
           status: 'completed',
-          comps_quote: updatedItem.comps_quote
+          comps_quote: updatedItem.comps_quote,
+          saved_comps: updatedItem.saved_comps
         });
       }
     }
@@ -905,7 +993,7 @@ function App() {
   const downloadBatchCSV = async (batchId: string) => {
     const batchItems = await getBatchItems(batchId);
     
-    const escapeCSV = (value: string): string => {
+    const escapeCSV = (value: any): string => {
       if (value === null || value === undefined) return '';
       const str = String(value);
       if (str.includes(',') || str.includes('"') || str.includes('\n')) {
@@ -1056,7 +1144,9 @@ function App() {
                 onClick={() => {
                   // Mark batch as completed (user chose not to resume)
                   saveBatch({ ...incompleteBatch, status: 'completed' });
+                  if (user) syncBatchToCloud(user.uid, { ...incompleteBatch, status: 'completed' });
                   setShowResumePrompt(false);
+                  setIncompleteBatch(null);
                 }}
                 style={{ flex: 1 }}
               >
@@ -1080,7 +1170,7 @@ function App() {
           zIndex: 50,
           minWidth: '160px'
         }}>
-          {(['home', 'history', 'inventory', 'settings'] as ViewType[]).map(view => (
+          {(['home', 'inventory'] as ViewType[]).map(view => (
             <button
               key={view}
               onClick={() => { setCurrentView(view); setShowMenu(false); }}
@@ -1097,7 +1187,7 @@ function App() {
                 cursor: 'pointer'
               }}
             >
-              {view === 'home' ? '📦 Catalog' : view === 'history' ? '📚 History' : view === 'inventory' ? '📋 Inventory' : view === 'progress' ? '⏳ Progress' : '⚙️ Settings'}
+              {view === 'home' ? '📦 Catalog' : view === 'inventory' ? '📋 Inventory' : '⚙️ Settings'}
             </button>
           ))}
           {/* Show Progress option when actively processing */}
@@ -1120,6 +1210,26 @@ function App() {
               ⏳ View Progress ({progress.current}/{progress.total})
             </button>
           )}
+          <div style={{ padding: '8px 16px', borderTop: '1px solid #eee' }}>
+             <small style={{ color: '#999' }}>Settings</small>
+          </div>
+          <button 
+            onClick={() => { setCurrentView('settings'); setShowMenu(false); }}
+            style={{
+              display: 'block',
+              width: '100%',
+              padding: '12px 20px',
+              border: 'none',
+              background: currentView === 'settings' ? '#F3F4F6' : 'transparent',
+              textAlign: 'left',
+              fontSize: '14px',
+              fontWeight: currentView === 'settings' ? 600 : 400,
+              color: 'var(--text-main)',
+              cursor: 'pointer'
+            }}
+          >
+            ⚙️ App Settings
+          </button>
         </div>
       )}
 
@@ -1270,52 +1380,79 @@ function App() {
               </>
             )}
 
-            {/* Dashboard State: Show Grid */}
+            {/* Dashboard State: Show New Session Card FIRST */}
             {!processing && hasItems && (
               <>
-                {/* Slim New Session Button */}
-                <div style={{ padding: '16px' }}>
-                  <button 
-                    className="btn-seamless btn-ghost"
-                    onClick={handleStartNew}
-                    style={{ width: '100%' }}
-                  >
-                    ➕ Start New Session
-                  </button>
-                </div>
+                <NewSessionCard
+                  boxId={boxId}
+                  onBoxIdChange={setBoxId}
+                  onFilesSelected={setFiles}
+                  onStartCataloging={() => processBatch()}
+                  isProcessing={processing}
+                  selectedCount={files.length}
+                />
 
-                {/* Section Header */}
-                <div style={{ padding: '0 16px' }}>
-                  <h3 style={{ 
-                    fontFamily: 'Outfit, sans-serif', 
-                    fontSize: '18px', 
-                    margin: '0 0 12px',
-                    color: 'var(--text-main)'
-                  }}>
-                    Recent Identifications
+                {/* Section Header with Sorting (More Compact) */}
+                <div style={{ padding: '0 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '24px 0 8px' }}>
+                  <h3 style={{ fontFamily: 'Outfit, sans-serif', fontSize: '16px', margin: 0, color: 'var(--text-main)' }}>
+                    Recent activity
                   </h3>
+                  <select
+                    id="sort-dashboard"
+                    value={inventorySort}
+                    onChange={(e) => setInventorySort(e.target.value as InventorySortOption)}
+                    style={{
+                      padding: '4px 8px',
+                      borderRadius: '6px',
+                      border: '1px solid #E5E7EB',
+                      fontSize: '11px',
+                      backgroundColor: 'white',
+                      fontWeight: 700,
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <option value="created_at-desc">Newest</option>
+                    <option value="title-asc">A-Z</option>
+                    <option value="year-desc">Year</option>
+                    <option value="box_id-asc">Box</option>
+                  </select>
                 </div>
 
-                {/* Item Grid */}
-                <div className="triage-grid">
-                  {items.map((item, index) => (
-                    <ItemCard
-                      key={item.id || index}
-                      item={item}
-                      onCardClick={setSelectedItem}
-                    />
-                  ))}
+                {/* Item Grid (NOW HORIZONTAL SCROLL) */}
+                <div className="horizontal-scroll">
+                  {items
+                    .sort((a, b) => {
+                      if (inventorySort === 'title-asc') return (a.title || '').localeCompare(b.title || '');
+                      if (inventorySort === 'title-desc') return (b.title || '').localeCompare(a.title || '');
+                      if (inventorySort === 'year-asc') return (a.year || '').localeCompare(b.year || '');
+                      if (inventorySort === 'year-desc') return (b.year || '').localeCompare(a.year || '');
+                      if (inventorySort === 'box_id-asc') return (a.box_id || '').localeCompare(b.box_id || '');
+                      if (inventorySort === 'box_id-desc') return (b.box_id || '').localeCompare(a.box_id || '');
+                      if (inventorySort === 'created_at-asc') return (a.processed_at || '').localeCompare(b.processed_at || '');
+                      return (b.processed_at || '').localeCompare(a.processed_at || '');
+                    })
+                    .map((item, index) => (
+                      <ItemCard
+                        key={item.id || index}
+                        item={item}
+                        onCardClick={setSelectedItem}
+                      />
+                    ))}
                 </div>
 
-                {/* Export Button */}
-                <div style={{ padding: '16px' }}>
+                {/* Export Button (Subtle) */}
+                <div style={{ padding: '16px', textAlign: 'center' }}>
                   <button
-                    className="btn-seamless btn-primary"
+                    className="btn-seamless btn-ghost"
+                    style={{ width: 'auto', fontSize: '12px', padding: '8px 16px' }}
                     onClick={() => {
-                      const escapeCSV = (v: string) => {
-                        if (!v) return '';
-                        if (v.includes(',') || v.includes('"')) return `"${v.replace(/"/g, '""')}"`;
-                        return v;
+                      const escapeCSV = (v: any) => {
+                        if (v === null || v === undefined) return '';
+                        const str = String(v);
+                        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+                          return `"${str.replace(/"/g, '""')}"`;
+                        }
+                        return str;
                       };
                       const rows = [
                         ['filename', 'box_id', 'title', 'type', 'year', 'notes', 'confidence'],
@@ -1404,12 +1541,12 @@ function App() {
         {/* INVENTORY VIEW */}
         {currentView === 'inventory' && (
           <div className="card" style={{ margin: '16px', padding: '20px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-              <h2 style={{ fontFamily: 'Outfit, sans-serif', fontSize: '22px', fontWeight: 800, margin: 0 }}>🗄️ Inventory</h2>
-              <button className="btn-seamless btn-ghost" onClick={() => loadInventory(true)} style={{ padding: '8px 12px' }}>
-                🔄 Refresh
-              </button>
-            </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+          <h2 style={{ fontFamily: 'Outfit, sans-serif', fontSize: '18px', fontWeight: 800, margin: 0 }}>🗄️ Inventory</h2>
+          <button className="btn-seamless btn-ghost" onClick={() => loadInventory(true)} style={{ padding: '6px 10px', fontSize: '12px' }}>
+            🔄 Refresh
+          </button>
+        </div>
 
             {inventory.length === 0 ? (
               <div className="empty-state">
@@ -1418,8 +1555,8 @@ function App() {
               </div>
             ) : (
               <>
-                <div style={{ marginBottom: '16px', display: 'flex', gap: '8px', alignItems: 'center' }}>
-                  <label htmlFor="sort-inventory" style={{ fontSize: '13px', color: 'var(--text-secondary)', fontWeight: 600 }}>Sort by:</label>
+                <div style={{ marginBottom: '12px', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <label htmlFor="sort-inventory" style={{ fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 700 }}>Sort:</label>
                   <select
                     id="sort-inventory"
                     value={inventorySort}
@@ -1443,49 +1580,27 @@ function App() {
                     <option value="created_at-asc">Date Added (Oldest First)</option>
                   </select>
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <div className="triage-grid">
                   {inventory.map((item, idx) => (
-                    <div 
-                      key={item.id || idx} 
-                      className="card hover-scale" 
-                      onClick={() => handleInventoryItemClick(item)}
-                      style={{ 
-                        padding: '12px', 
-                        display: 'flex', 
-                        gap: '12px', 
-                        cursor: 'pointer',
-                        border: '1px solid #F1F5F9',
-                        transition: 'all 0.2s ease'
+                    <ItemCard
+                      key={item.id || idx}
+                      item={{
+                        id: item.id || 0,
+                        batch_id: 'inventory',
+                        filename: 'inventory_item.jpg',
+                        box_id: item.box_id,
+                        title: item.title,
+                        type: item.type,
+                        year: item.year,
+                        notes: item.notes,
+                        confidence: item.confidence,
+                        processed_at: item.last_seen,
+                        image_data: item.thumbnail || '',
+                        status: 'completed',
+                        comps_quote: item.comps_quote
                       }}
-                    >
-                      <div style={{ 
-                        width: '64px', 
-                        height: '64px', 
-                        borderRadius: '12px', 
-                        backgroundColor: '#F3F4F6', 
-                        overflow: 'hidden',
-                        flexShrink: 0,
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center'
-                      }}>
-                        {item.thumbnail ? (
-                          <img 
-                            src={item.thumbnail.startsWith('data:') ? item.thumbnail : `data:image/jpeg;base64,${item.thumbnail}`} 
-                            alt={item.title} 
-                            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                          />
-                        ) : (
-                          <span style={{ fontSize: '20px' }}>📦</span>
-                        )}
-                      </div>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-main)', marginBottom: '4px' }}>{item.title}</div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                          {item.type} {item.year && `(${item.year})`} - Box: {item.box_id}
-                        </div>
-                      </div>
-                    </div>
+                      onCardClick={() => handleInventoryItemClick(item)}
+                    />
                   ))}
                 </div>
               </>
@@ -1555,7 +1670,6 @@ function App() {
                 </div>
                 <div style={{ padding: '8px', background: 'white', borderRadius: '8px', border: '1px solid #F1F5F9' }}>
                   <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>OpenAI (Paid)</div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>OpenAI (Paid)</div>
                   <div style={{ fontSize: '16px', fontWeight: 700 }}>{aiUsage.openai} <small style={{ fontSize: '10px', color: '#DC2626' }}>~${(aiUsage.openai * 0.01).toFixed(2)}</small></div>
                 </div>
               </div>
@@ -1567,6 +1681,47 @@ function App() {
               </button>
             </div>
             
+            <div style={{ borderTop: '1px solid #E5E7EB', paddingTop: '20px', marginBottom: '24px' }}>
+               <h3 style={{ fontSize: '14px', fontWeight: 700, marginBottom: '12px' }}>
+                 📜 Processing History
+               </h3>
+               <div style={{ maxHeight: '300px', overflowY: 'auto', border: '1px solid #E5E7EB', borderRadius: '8px' }}>
+                  <BatchHistory 
+                    batches={batches}
+                    onResume={(batch) => {
+                      setIncompleteBatch(batch);
+                      resumeBatch(batch);
+                    }}
+                    onDownloadCSV={downloadBatchCSV}
+                    onDelete={async (batchId) => {
+                       // Delete local logic would act here
+                       // Since BatchHistory is currently view-only props, we might need a prop on BatchHistory? 
+                       // Wait, BatchHistory takes `onDelete`? No, let's check BatchHistory props.
+                       // For now, we just view it.
+                       alert("Delete from history coming soon.");
+                    }}
+                  />
+               </div>
+            </div>
+
+            <div style={{ borderTop: '1px solid #E5E7EB', paddingTop: '20px', marginBottom: '24px' }}>
+               <h3 style={{ fontSize: '14px', fontWeight: 700, marginBottom: '12px' }}>
+                 📜 Processing History
+               </h3>
+               <div style={{ maxHeight: '300px', overflowY: 'auto', border: '1px solid #E5E7EB', borderRadius: '8px' }}>
+                  <BatchHistory 
+                    batches={batches}
+                    onResume={(batch) => {
+                      setIncompleteBatch(batch);
+                      resumeBatch(batch);
+                    }}
+                    onDownloadCSV={downloadBatchCSV}
+                    onLoadBatch={() => {}} // Not needed in settings view context
+                    onRefresh={loadBatchHistory}
+                  />
+               </div>
+            </div>
+
             <div style={{ borderTop: '1px solid #E5E7EB', paddingTop: '20px', marginBottom: '24px' }}>
               <label style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginBottom: '8px' }}>
                 📝 Developer & Workflow Notes
@@ -1660,6 +1815,24 @@ function App() {
                   style={{ flex: 1, color: '#3b82f6' }}
                 >
                   🔄 Retry Network
+                </button>
+              </div>
+
+              {/* Manual Cloud Controls */}
+              <div style={{ marginTop: '16px', display: 'flex', gap: '8px' }}>
+                <button
+                  className="btn-seamless btn-primary"
+                  onClick={handleForcePush}
+                  style={{ flex: 1, background: '#8B5CF6', border: 'none' }}
+                >
+                  ☁️ Force Push
+                </button>
+                <button
+                  className="btn-seamless btn-ghost"
+                  onClick={handleForcePull}
+                  style={{ flex: 1, border: '1px solid #8B5CF6', color: '#8B5CF6' }}
+                >
+                  📥 Force Pull
                 </button>
               </div>
 
@@ -1774,18 +1947,24 @@ function App() {
           bottom: '100px',
           left: '50%',
           transform: 'translateX(-50%)',
-          backgroundColor: 'rgba(0,0,0,0.85)',
+          background: 'rgba(17, 24, 39, 0.9)', /* Sleek Dark Gray */
           color: 'white',
-          padding: '12px 24px',
-          borderRadius: '12px',
-          fontSize: '14px',
-          fontWeight: 600,
+          padding: '10px 20px',
+          borderRadius: '100px', /* Pill shape */
+          fontSize: '13px',
+          fontWeight: 700,
           zIndex: 200,
-          animation: 'slideUp 0.3s ease',
+          boxShadow: '0 10px 15px -3px rgba(0,0,0,0.2)',
+          border: '1px solid rgba(255,255,255,0.1)',
+          animation: 'slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
           maxWidth: '90%',
-          textAlign: 'center'
+          textAlign: 'center',
+          backdropFilter: 'blur(8px)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px'
         }}>
-          {toastMessage}
+          {toastMessage.includes('Synced') ? '✨' : toastMessage.includes('✅') ? '✅' : 'ℹ️'} {toastMessage}
         </div>
       )}
     </div>

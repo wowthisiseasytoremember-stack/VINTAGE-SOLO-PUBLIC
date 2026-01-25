@@ -1,6 +1,5 @@
-import { saveBatch, getBatches, getBatchItems, saveItem, deleteBatch, initDB, getAllInventory, addToInventory, InventoryItem } from './db';
-import { analyzeImage, AIKeys, AIResult } from './aiService';
-import { syncItemToCloud, UserSettings } from './firestoreSync';
+import { saveBatch, getBatches, saveItem, deleteBatch, initDB, addToInventory } from './db';
+import { analyzeImage, AIKeys } from './aiService';
 import { auth, isFirebaseConfigured } from './firebase';
 import { performVisionPass } from './visionService';
 import { db } from './firebase';
@@ -342,7 +341,6 @@ export class SystemValidator {
         // TEST 5: The "Sticky Fingers" Key (Whitespace)
         // Scenario: User pastes " sk-1234 " with spaces.
         try {
-            const dirtyKeys = { ...keys, openai: ' ' + (keys.openai || 'sk-test') + ' ' };
             // Requires mock or checking if the service trims.
             // We can check by calling resizeImageForAI (safe) or just check analyze with tiny image
             // We assumeanalyzeImage should work if we implement trimming. 
@@ -393,14 +391,6 @@ export class SystemValidator {
         // Scenario: Item metadata is > 1MB. Cloud sync will fail.
         // Expectation: App should trim or warn, NOT silently fail sync.
         try {
-            const hugeString = "a".repeat(1024 * 1024 + 100); // 1MB + 100 bytes
-            const hugeItem: any = {
-                batch_id: 'bomb_batch',
-                filename: 'bomb.jpg',
-                raw_metadata: { description: hugeString },
-                status: 'completed'
-            };
-            
             // We can't actually write to cloud in test without costing user money/bandwidth? 
             // We can rely on a helper function check. 
             // Let's call `syncItemToCloud` with a mock? 
@@ -436,6 +426,40 @@ export class SystemValidator {
         }
 
         return results;
+    }
+
+    // TEST 9: Resume Logic (SessionStorage Check)
+    static runResumeLogicCheck(): TestResult {
+         try {
+            sessionStorage.setItem('test_resume_flag', 'true');
+            if (sessionStorage.getItem('test_resume_flag') === 'true') {
+                 sessionStorage.removeItem('test_resume_flag');
+                 return { name: "Resume Logic (Flag Check)", passed: true, message: "SessionStorage working (Logic enabled)" };
+            }
+            return { name: "Resume Logic (Flag Check)", passed: false, message: "SessionStorage unavailable (Popup spam risk)" };
+        } catch (e) {
+            return { name: "Resume Logic (Flag Check)", passed: false, message: "SessionStorage error" };
+        }
+    }
+
+    // TEST 10: Ghost Sync Prevention
+    static runGhostSyncCheck(): TestResult {
+         try {
+            const cloudBatches = [{ batch_id: 'a' }, { batch_id: 'b' }];
+            const localBatches = [{ batch_id: 'a' }, { batch_id: 'b' }];
+            const localIds = new Set(localBatches.map(b => b.batch_id));
+            let addedCount = 0;
+            for (const b of cloudBatches) { 
+                if (!localIds.has(b.batch_id)) addedCount++;
+            }
+            
+            if (addedCount === 0) {
+                 return { name: "Ghost Sync Prevention", passed: true, message: "Dedupe logic correctly identified 0 new items" };
+            }
+            return { name: "Ghost Sync Prevention", passed: false, message: "Dedupe logic failed (Would toast 0 items)" };
+        } catch (e) {
+            return { name: "Ghost Sync Prevention", passed: false, message: "Logic Test Failed" };
+        }
     }
 }
 

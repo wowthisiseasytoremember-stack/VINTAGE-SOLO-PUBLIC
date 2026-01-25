@@ -15,6 +15,7 @@ export interface CatalogItem {
   image_data?: string;
   status?: 'pending' | 'processing' | 'completed' | 'failed';
   comps_quote?: string;
+  saved_comps?: string; // JSON string of comps history
   condition_estimate?: string;
   raw_metadata?: Record<string, any>;
 }
@@ -67,26 +68,22 @@ const ItemCard: React.FC<ItemCardProps> = ({ item, onCardClick }) => {
       <div className="triage-card-footer">
         <h3 className="triage-card-title">{item.title || 'Untitled'}</h3>
         <div className="triage-card-badges">
-          <span 
-            className="triage-card-badge" 
-            style={{ cursor: 'pointer' }}
-            onClick={(e) => { e.stopPropagation(); openEbayComps(item.title || '', item.year); }}
-          >
-            🔍 Comps
-          </span>
-          {item.year && (
-            <span className="triage-card-badge">
-              📅 {item.year}
-            </span>
-          )}
-          {item.comps_quote && (
+          {item.comps_quote ? (
             <span className="triage-card-badge" style={{ background: '#FEF3C7', color: '#92400E', fontWeight: 800 }}>
               💰 ${item.comps_quote}
             </span>
+          ) : (
+            <span 
+              className="triage-card-badge" 
+              style={{ cursor: 'pointer', background: '#DBEAFE', color: '#1E40AF', borderColor: '#BFDBFE' }}
+              onClick={(e) => { e.stopPropagation(); openEbayComps(item.title || '', item.year); }}
+            >
+              🔍 Comps
+            </span>
           )}
           {/* Mom-Proofing: Cloud Checkmark (Always green for simplicity if item exists) */}
-           <span className="triage-card-badge" style={{ background: '#ECFDF5', color: '#059669', borderColor: '#A7F3D0' }}>
-             ☁️ Saved
+           <span className="triage-card-badge" style={{ background: '#ECFDF5', color: '#059669', borderColor: '#A7F3D0', padding: '2px 6px', fontSize: '11px' }}>
+             ☁️✅
            </span>
         </div>
       </div>

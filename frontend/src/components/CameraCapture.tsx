@@ -1,15 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import axios from 'axios';
 
-// Auto-detect API URL based on environment
-const getApiUrl = () => {
-  if (process.env.REACT_APP_API_URL) return process.env.REACT_APP_API_URL;
-  const protocol = window.location.protocol;
-  const hostname = window.location.hostname;
-  return `${protocol}//${hostname}:8000`;
-};
 
-const API_URL = getApiUrl();
 
 interface CameraCaptureProps {
   initialBoxId?: string;

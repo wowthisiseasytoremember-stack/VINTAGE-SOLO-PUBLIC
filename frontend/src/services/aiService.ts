@@ -39,18 +39,9 @@ export async function analyzeImage(
 
   let lastError: any = null;
 
-  // 1. VISION API FIRST PASS ("Sit on Top" Strategy)
-  try {
-    const visionResult = await performVisionPass(base64Image);
-    if (visionResult && visionResult.isSufficient) {
-      console.log('✅ Vision API pass was sufficient, skipping LLMs.');
-      return visionResult.data;
-    } else if (visionResult) {
-      console.log('ℹ️ Vision API data insufficient, falling back to LLMs...');
-    }
-  } catch (err) {
-    console.warn('Vision pass error (falling back):', err);
-  }
+  // 1. LLM FIRST STRATEGY (User Requirement: Google Cloud Vision is too slow/blocking)
+  // We skip the explicit Vision API pass and go straight to the priority loop.
+
 
   // 2. LLM FALLBACK LOGIC
   // Debug: log which keys are available
@@ -96,14 +87,28 @@ export async function analyzeImage(
   }
 
   // LAST RESORT: Return a "basic" result so the user can still edit/save
-  console.error("All AI providers failed. Falling back to Manual Entry.", lastError);
+  console.error("All AI providers failed. Falling back to Local Heuristics (Zero-Timeout).", lastError);
+  return generateLocalFallback(base64Image, lastError);
+}
+
+function generateLocalFallback(base64Image: string, error: any): AIResult {
+  const sizeKB = Math.round(base64Image.length / 1024);
+  const timestamp = new Date().toLocaleTimeString();
+  
   return {
-    title: "Manual Entry Required",
-    type: "other",
+    title: `Unidentified Item (${timestamp})`,
+    type: "unknown",
     year: "Unknown",
-    notes: `AI Analysis Failed: ${lastError?.message || 'Unknown error'}. Please retry later.`,
-    confidence: "0%"
+    notes: `AI Analysis unavailable. Item captured at ${timestamp}. Size: ~${sizeKB}KB. Error: ${error?.message || 'Timeout/Network'}`,
+    confidence: "10%", // Low confidence to indicate fallback
+    condition_estimate: "Not assessed",
+    raw_metadata: {
+        fallback_mode: true,
+        error_details: error?.message,
+        capture_time: new Date().toISOString()
+    }
   };
+
 }
 
 // Resize image to reduce upload size (AI doesn't need HD)
@@ -219,11 +224,9 @@ async function callGemini(base64Content: string, apiKey: string): Promise<AIResu
   if (models.length === 0) {
     models = [
       'gemini-2.0-flash-exp',
-      'gemini-2.0-flash',
       'gemini-1.5-flash',
-      'gemini-1.5-pro', 
-      'gemini-pro-vision',
-      'gemini-pro'
+      'gemini-1.5-pro',
+      'gemini-pro-vision'
     ];
   }
   

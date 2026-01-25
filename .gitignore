@@ -23,3 +23,6 @@ env/
 
 # Archived backend (retired)
 _archived/
+
+# Local Netlify folder
+.netlify

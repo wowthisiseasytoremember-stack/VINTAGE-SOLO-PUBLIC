@@ -16,12 +16,13 @@ interface BatchHistoryProps {
   onDownloadCSV: (batchId: string) => void;
   onRefresh: () => void;
   onResume?: (batchId: string) => void;
+  onDelete?: (batchId: string) => Promise<void>;
   standalone?: boolean;
   hasMore?: boolean;
   onLoadMore?: () => void;
 }
 
-const BatchHistory: React.FC<BatchHistoryProps> = ({ batches, onLoadBatch, onDownloadCSV, onRefresh, onResume, standalone, hasMore, onLoadMore }: BatchHistoryProps) => {
+const BatchHistory: React.FC<BatchHistoryProps> = ({ batches, onLoadBatch, onDownloadCSV, onRefresh, onResume, onDelete, standalone, hasMore, onLoadMore }: BatchHistoryProps) => {
   const formatDate = (dateString: string) => {
     try {
       const date = new Date(dateString);
@@ -138,6 +139,18 @@ const BatchHistory: React.FC<BatchHistoryProps> = ({ batches, onLoadBatch, onDow
                             className="text-emerald-600 font-black text-[10px] uppercase tracking-widest hover:bg-white hover:shadow-md px-3 py-2 rounded-lg transition-all"
                           >
                             Export CSV
+                          </button>
+                        )}
+                        {onDelete && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if(window.confirm('Delete this batch?')) onDelete(batch.batch_id);
+                            }}
+                            className="bg-red-50 text-red-500 hover:bg-red-100 font-black text-[10px] uppercase tracking-widest px-3 py-2 rounded-lg transition-all"
+                            title="Delete"
+                          >
+                            🗑️
                           </button>
                         )}
                       </div>

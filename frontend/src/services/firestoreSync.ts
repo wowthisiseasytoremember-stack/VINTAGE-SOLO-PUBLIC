@@ -36,6 +36,28 @@ const handleNetworkError = (error: any) => {
   }
 };
 
+/**
+ * 🛡️ Firestore Sanitizer
+ * Recursively removes 'undefined' values which Firestore hates.
+ * Replaces them with null or strips them to keep Firestore happy.
+ */
+const sanitizeForFirestore = (data: any): any => {
+  if (data === undefined) return null;
+  if (data === null) return null;
+  if (Array.isArray(data)) return data.map(sanitizeForFirestore);
+  if (typeof data === 'object') {
+    const clean: any = {};
+    Object.keys(data).forEach(key => {
+      const val = data[key];
+      if (val !== undefined) {
+        clean[key] = sanitizeForFirestore(val);
+      }
+    });
+    return clean;
+  }
+  return data;
+};
+
 
 
 // Types matching the local DB schema
@@ -109,10 +131,10 @@ export async function saveUserSettings(userId: string, settings: UserSettings): 
 
   try {
     const settingsRef = doc(db, 'users', userId, 'settings', 'preferences');
-    await setDoc(settingsRef, {
+    await setDoc(settingsRef, sanitizeForFirestore({
       ...settings,
       updatedAt: new Date().toISOString()
-    }, { merge: true });
+    }), { merge: true });
     console.log('☁️ Settings synced to cloud');
   } catch (error) {
     console.error('Failed to save settings to Firestore:', error);
@@ -147,10 +169,10 @@ export async function syncBatchToCloud(userId: string, batch: BatchData): Promis
 
   try {
     const batchRef = doc(db, 'users', userId, 'batches', batch.batch_id);
-    await setDoc(batchRef, {
+    await setDoc(batchRef, sanitizeForFirestore({
       ...batch,
       syncedAt: new Date().toISOString()
-    });
+    }));
     console.log(`☁️ Batch ${batch.batch_id} synced`);
   } catch (error) {
     console.error('Failed to sync batch:', error);
@@ -225,7 +247,7 @@ export async function syncItemToCloud(userId: string, item: ItemData): Promise<v
         payload = { ...stripped, syncedAt: new Date().toISOString(), notes: "Metadata stripped (too large)" };
     }
 
-    await setDoc(itemRef, payload);
+    await setDoc(itemRef, sanitizeForFirestore(payload));
   } catch (error) {
     console.error('Failed to sync item:', error);
   }
@@ -271,10 +293,10 @@ export async function syncInventoryToCloud(userId: string, item: InventoryData):
     // We NOW sync thumbnails because they are small (<5KB) and critical for UX
     // const { thumbnail, ...itemWithoutThumb } = item as any;
     
-    await setDoc(invRef, {
+    await setDoc(invRef, sanitizeForFirestore({
       ...item,
       syncedAt: new Date().toISOString()
-    });
+    }));
   } catch (error) {
     console.error('Failed to sync inventory item:', error);
   }
