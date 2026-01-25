@@ -6,12 +6,14 @@ import ItemCard, { CatalogItem } from './components/ItemCard';
 import ItemDetail from './components/ItemDetail';
 import BatchHistory from './components/BatchHistory';
 import CameraCapture from './components/CameraCapture';
+import ImageProgressList, { ItemStatus } from './components/ImageProgressList';
 
 // Self-Contained Services
 import { initDB, saveBatch, saveItem, getBatches, getBatchItems, updateItem, deleteItem, getIncompleteBatches, findByImageHash, addToInventory, updateInventoryItem, getAllInventory, InventoryItem, getLatestItemByHash } from './services/db';
 import { analyzeImage, AIKeys, AIProvider } from './services/aiService';
 import { SystemValidator, TestResult } from './services/testRunner';
 import { computeImageHash, generateThumbnail } from './services/imageHash';
+import { extractPhotoMetadata, extractFromBuffer } from './services/metadataService';
 
 // Firebase & Cloud Sync
 import { useAuth } from './contexts/AuthContext';
@@ -27,6 +29,7 @@ import {
   syncAllToCloud,
   retryConnection
 } from './services/firestoreSync';
+import { uploadToQueue, waitForItem, isServerProcessingAvailable } from './services/serverQueue';
 
 interface BatchSummary {
   batch_id: string;
@@ -37,7 +40,30 @@ interface BatchSummary {
   created_at: string;
 }
 
-type ViewType = 'home' | 'history' | 'inventory' | 'settings';
+
+
+type ViewType = 'home' | 'history' | 'inventory' | 'settings' | 'progress';
+type InventorySortOption = 'created_at-desc' | 'created_at-asc' | 'title-asc' | 'title-desc' | 'year-asc' | 'year-desc' | 'box_id-asc' | 'box_id-desc';
+
+// Helper to get type-specific placeholder images
+const getPlaceholderForType = (type?: string): string => {
+  const typeMap: Record<string, string> = {
+    'comic book': '/placeholders/comic.svg',
+    'comic': '/placeholders/comic.svg',
+    'toy': '/placeholders/toy.svg',
+    'action figure': '/placeholders/toy.svg',
+    'figure': '/placeholders/toy.svg',
+    'card': '/placeholders/card.svg',
+    'trading card': '/placeholders/card.svg',
+    'vinyl': '/placeholders/vinyl.svg',
+    'record': '/placeholders/vinyl.svg',
+    'book': '/placeholders/book.svg',
+    'photo': '/placeholders/photo.svg',
+    'photograph': '/placeholders/photo.svg'
+  };
+  const lowerType = (type || '').toLowerCase();
+  return typeMap[lowerType] || '/placeholders/other.svg';
+};
 
 function App() {
   // ========== AUTH STATE ==========
@@ -62,8 +88,99 @@ function App() {
   const [files, setFiles] = useState<File[]>([]);
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0, currentFilename: '' });
+  const [processingQueue, setProcessingQueue] = useState<ItemStatus[]>([]);
   const [items, setItems] = useState<CatalogItem[]>([]);
   const [batches, setBatches] = useState<BatchSummary[]>([]);
+  const [devNotes, setDevNotes] = useState(localStorage.getItem('dev_notes') || '');
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState('');
+  const [appStatus, setAppStatus] = useState<'initializing' | 'syncing' | 'ready' | 'error'>('initializing');
+
+  // ========== AI USAGE TRACKING ==========
+  const [aiUsage, setAiUsage] = useState({
+    gemini: parseInt(localStorage.getItem('usage_gemini') || '0'),
+    openai: parseInt(localStorage.getItem('usage_openai') || '0'),
+    claude: parseInt(localStorage.getItem('usage_claude') || '0')
+  });
+
+  // Debounced Save for Dev Notes
+  const saveDevNotes = useCallback(async (notes: string) => {
+      localStorage.setItem('dev_notes', notes);
+      if (user) {
+          await saveUserSettings(user.uid, { dev_notes: notes } as any);
+      }
+  }, [user]);
+
+  // Keep usage in sync with localStorage
+  useEffect(() => {
+    localStorage.setItem('usage_gemini', aiUsage.gemini.toString());
+    localStorage.setItem('usage_openai', aiUsage.openai.toString());
+    localStorage.setItem('usage_claude', aiUsage.claude.toString());
+  }, [aiUsage]);
+
+  // UX Hardening: Back Button Trap
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      event.preventDefault();
+      // If we are in process, or just generally to prevent exit
+      if (currentView !== 'home') {
+          setCurrentView('home');
+          window.history.pushState(null, '', window.location.pathname);
+      } else {
+          // Toast warning
+          showToast("Press Back again to Exit", 2000);
+          // Allow exit if pressed again quickly? Hard to implement perfectly in browser PWA without native wrappers
+          // But pushing state prevents immediate exit
+          window.history.pushState(null, '', window.location.pathname); 
+      }
+    };
+    
+    window.history.pushState(null, '', window.location.pathname);
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [currentView]);
+
+  // SW Update Listener
+  useEffect(() => {
+    const handleSWUpdate = () => {
+      setToastMessage("✨ New Update Available! Reloading...");
+      setTimeout(() => window.location.reload(), 2000); // Auto-reload for mom
+    };
+    window.addEventListener('sw-update', handleSWUpdate);
+    return () => window.removeEventListener('sw-update', handleSWUpdate);
+  }, []);
+
+  // Sync-on-Focus (Magic Sync)
+  useEffect(() => {
+    const handleFocus = async () => {
+      // Only sync if we are relatively idle and logged in
+      if (!processing && user && appStatus === 'ready') {
+        console.log("👁️ App focused - Checking for magic sync...");
+        setAppStatus('syncing'); 
+        // Quick pull of latest data
+        await loadBatchHistory(10); 
+        // We could also do a full cloud pull but that's heavy. 
+        // Let's assume firestoreSync 'loadAllFromCloud' is precise enough or we just trust realtime listeners if we had them (we don't yet).
+        // For now, let's just re-run the cloud merge light version if implemented, or just 'retryConnection' to ensure we are good.
+        // Actually, let's just re-fetch the history which helps if a new batch was added on another device.
+        const { batches: cloudBatches } = await loadAllFromCloud(user.uid);
+        if (cloudBatches.length > batches.length) {
+            // New stuff found!
+            showToast("✨ Found new items from your other device!");
+            for (const b of cloudBatches) { await saveBatch(b); }
+            loadBatchHistory();
+        }
+        setAppStatus('ready');
+      }
+    };
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
+  }, [user, processing, appStatus, batches.length]);
+
+  const incrementUsage = (provider: AIProvider) => {
+    setAiUsage(prev => ({ ...prev, [provider]: prev[provider] + 1 }));
+  };
+
   const [batchStartTime, setBatchStartTime] = useState<Date | null>(null);
   const [testResults, setTestResults] = useState<TestResult[] | null>(null);
   const [runningTests, setRunningTests] = useState(false);
@@ -72,16 +189,139 @@ function App() {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [isDbInitialized, setIsDbInitialized] = useState(false);
   const [dbError, setDbError] = useState(false);
-  const [inventoryLastKey, setInventoryLastKey] = useState<number | undefined>(undefined);
+  const [inventoryLastDate, setInventoryLastDate] = useState<string | undefined>(undefined);
   const [hasMoreInventory, setHasMoreInventory] = useState(true);
+  const [inventorySort, setInventorySort] = useState<InventorySortOption>('created_at-desc');
+
+  // Helper to show a toast
+  const showToast = (message: string, duration = 3000) => {
+    setToastMessage(message);
+    setTimeout(() => setToastMessage(null), duration);
+  };
+
+  // ========== DATA LOADING HELPERS ==========
+  const loadBatchHistory = async (limit = 10) => {
+    const localBatches = await getBatches(limit);
+    const batchesWithThumbs = await Promise.all(localBatches.map(async (b) => {
+      const items = await getBatchItems(b.batch_id);
+      const firstItem = items.find(i => i.image_data);
+      return {
+        batch_id: b.batch_id,
+        box_id: b.box_id,
+        total_images: b.total_images,
+        processed: b.processed,
+        failed: b.failed,
+        created_at: b.created_at,
+        thumbnail: firstItem ? (typeof firstItem.image_data === 'string' ? firstItem.image_data : undefined) : undefined
+      };
+    }));
+    setBatches(batchesWithThumbs);
+    
+    // Auto-load recent items for Home Screen (if empty)
+    if (batchesWithThumbs.length > 0 && items.length === 0) {
+      const latestBatchId = batchesWithThumbs[0].batch_id;
+      const batchItems = await getBatchItems(latestBatchId);
+      setItems(batchItems.map(item => ({
+        id: item.id,
+        batch_id: item.batch_id,
+        filename: item.filename,
+        box_id: item.box_id,
+        title: item.title,
+        type: item.type,
+        year: item.year,
+        notes: item.notes,
+        confidence: item.confidence,
+        processed_at: item.processed_at,
+        image_data: typeof item.image_data === 'string' ? item.image_data : undefined,
+        status: item.status,
+        comps_quote: item.comps_quote
+      })));
+    }
+  };
+
+  const loadBatch = async (batchId: string) => {
+    const batchItems = await getBatchItems(batchId);
+    setItems(batchItems.map(item => ({
+      id: item.id,
+      batch_id: item.batch_id,
+      filename: item.filename,
+      box_id: item.box_id,
+      title: item.title,
+      type: item.type,
+      year: item.year,
+      notes: item.notes,
+      confidence: item.confidence,
+      processed_at: item.processed_at,
+      image_data: typeof item.image_data === 'string' ? item.image_data : undefined,
+      status: item.status,
+      comps_quote: item.comps_quote
+    })));
+    setCurrentView('home');
+  };
+
+  const loadInventory = async (reset = true) => {
+    const limit = 50;
+    const lastDate = reset ? undefined : inventoryLastDate;
+    
+    // Pass sort option to DB
+    const newItems = await getAllInventory(limit, lastDate, inventorySort);
+    
+    if (reset) {
+      setInventory(newItems);
+    } else {
+      setInventory(prev => [...prev, ...newItems]);
+    }
+    
+    if (newItems.length > 0) {
+      const lastItem = newItems[newItems.length - 1];
+      setInventoryLastDate(lastItem.last_seen);
+    }
+    
+    setHasMoreInventory(newItems.length === limit);
+  };
+
+  const handleInventoryItemClick = async (item: InventoryItem) => {
+    const fullItem = await getLatestItemByHash(item.image_hash);
+    if (fullItem) {
+      setSelectedItem({
+        ...fullItem,
+        image_data: fullItem.image_data.toString().startsWith('data:') 
+          ? fullItem.image_data 
+          : `data:image/jpeg;base64,${fullItem.image_data}`
+      } as any);
+    } else {
+      setSelectedItem({
+        id: item.id || 0,
+        batch_id: 'inventory',
+        filename: 'inventory_item.jpg',
+        box_id: item.box_id,
+        title: item.title,
+        type: item.type,
+        year: item.year,
+        notes: item.notes,
+        confidence: item.confidence,
+        processed_at: item.last_seen,
+        image_data: item.thumbnail || '',
+        status: 'completed',
+        comps_quote: item.comps_quote
+      });
+    }
+  };
+
+  const handleStartNew = () => {
+    setItems([]);
+    setBoxId('');
+  };
 
   // Initialize DB and load history
   // CRITICAL: This must complete before ANY other DB or Cloud ops run
   useEffect(() => {
     const boot = async () => {
       try {
+        setStatusMessage('Initializing database...');
         await initDB();
         setIsDbInitialized(true); // Signal that DB is safe to use
+        setStatusMessage('Loading history...');
         await loadBatchHistory();
         
         // Initial Check for incomplete batches
@@ -90,9 +330,17 @@ function App() {
           setIncompleteBatch(incomplete[0]);
           setShowResumePrompt(true);
         }
+        
+        // If no user, we're done initializing (local only mode)
+        if (!user) {
+          setAppStatus('ready');
+          setStatusMessage('Ready (Offline Mode)');
+        }
       } catch (err) {
         console.error("Critical Boot Error:", err);
         setDbError(true);
+        setAppStatus('error');
+        setStatusMessage('Database Error!');
       }
     };
     boot();
@@ -106,6 +354,8 @@ function App() {
 
       if (user && !keysLoadedFromCloud) {
         console.log('☁️ User logged in, syncing cloud data...');
+        setAppStatus('syncing');
+        setStatusMessage('Syncing with cloud...');
         
         // 1. Sync Settings (API Keys)
         const cloudSettings = await loadUserSettings(user.uid);
@@ -115,9 +365,14 @@ function App() {
             if (val) localStorage.setItem(`ai_key_${provider}`, val);
           });
         }
+        if (cloudSettings?.dev_notes) {
+            setDevNotes(cloudSettings.dev_notes);
+            localStorage.setItem('dev_notes', cloudSettings.dev_notes);
+        }
 
         // 2. Fetch all history/inventory from cloud (for multi-device support)
         try {
+          setStatusMessage('Merging cloud data...');
           const { batches: cloudBatches, inventory: cloudInv } = await loadAllFromCloud(user.uid);
           
           if (cloudBatches.length > 0) {
@@ -139,7 +394,7 @@ function App() {
                 await updateInventoryItem(existing.id, item);
               }
             }
-            loadInventory();
+            loadInventory(true);
           }
 
           // 3. Fallback: If cloud is empty but local has data, push local to cloud
@@ -151,8 +406,15 @@ function App() {
               await syncAllToCloud(user.uid, localBatches, [], localInventory);
             }
           }
+          
+          setAppStatus('ready');
+          setStatusMessage('Ready ✓');
+          showToast('✅ Synced with cloud successfully!');
         } catch (err) {
           console.error('Failed to pull cloud data:', err);
+          setAppStatus('error');
+          setStatusMessage('Sync Failed!');
+          showToast('❌ Cloud sync failed. Data saved locally.');
         }
 
         setKeysLoadedFromCloud(true);
@@ -168,54 +430,48 @@ function App() {
   // Refresh data when switching views
   useEffect(() => {
     if (currentView === 'history') loadBatchHistory();
-    if (currentView === 'inventory') loadInventory();
-  }, [currentView]);
+    if (currentView === 'inventory') loadInventory(true);
+    if (currentView === 'home') loadBatchHistory(); // Load recent items for dashboard
+  }, [currentView, inventorySort]);
 
   // Save boxId to localStorage
   useEffect(() => {
     if (boxId) localStorage.setItem('boxId', boxId);
   }, [boxId]);
 
-  // ========== INVENTORY ==========
 
+  const processBatch = async (overrideFiles?: File[], overrideBoxId?: string) => {
+    const filesToProcess = overrideFiles || (files.length > 0 ? files : []);
+    const targetBoxId = overrideBoxId || boxId || 'Uncategorized';
 
-  const loadInventory = async (reset = true) => {
-    const limit = 50;
-    const lastKey = reset ? undefined : inventoryLastKey;
-    const newItems = await getAllInventory(limit, lastKey);
-    
-    if (reset) {
-      setInventory(newItems);
-    } else {
-      setInventory(prev => [...prev, ...newItems]);
+    if (!filesToProcess || filesToProcess.length === 0) {
+      console.warn("processBatch called with no files.");
+      return;
     }
     
-    if (newItems.length > 0) {
-      const lastItem = newItems[newItems.length - 1];
-      setInventoryLastKey(lastItem.id); // inventory key is 'id' (number)
-    }
-    
-    setHasMoreInventory(newItems.length === limit);
-  };
-
-  // ========== PROCESSING LOGIC ==========
-  const processBatch = async () => {
-    if (files.length === 0) return;
-    
-    const totalFiles = files.length;
+    const totalFiles = filesToProcess.length;
     const batchId = `local-${Date.now()}`;
     const startTime = new Date();
     
     setProcessing(true);
+    setCurrentView('progress');
+    setItems([]); 
     setBatchStartTime(startTime);
     setProgress({ current: 0, total: totalFiles, currentFilename: '' });
+    
+    const initialQueue: ItemStatus[] = filesToProcess.map((f, idx) => ({
+      id: Date.now() + idx,
+      filename: f.name,
+      status: 'pending'
+    }));
+    setProcessingQueue(initialQueue);
 
     const results: CatalogItem[] = [];
+    let serverFailedForBatch = false; // If server fails once, skip for rest of batch
     
-    // Save Batch Start in DB
     await saveBatch({
       batch_id: batchId,
-      box_id: boxId || 'Uncategorized',
+      box_id: targetBoxId,
       total_images: totalFiles,
       processed: 0,
       failed: 0,
@@ -223,58 +479,87 @@ function App() {
       status: 'processing'
     });
 
-    const CHUNK_SIZE = 5;
     const DELAY_MS = 1500;
-    const processedHashesInBatch = new Map<string, any>(); // Improve in-batch dedupe
+    const processedHashesInBatch = new Map<string, any>(); 
     
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
+    for (let i = 0; i < filesToProcess.length; i++) {
+      const file = filesToProcess[i];
+      const queueId = initialQueue[i].id;
+      
       setProgress(prev => ({ ...prev, current: i, currentFilename: file.name }));
+      setProcessingQueue(prev => prev.map(p => p.id === queueId ? { ...p, status: 'processing' } : p));
       
       try {
-        // Convert to Base64
         const reader = new FileReader();
-        const base64Promise = new Promise<string>((resolve) => {
+        const base64Promise = new Promise<string>((resolve, reject) => {
           reader.onload = () => resolve((reader.result as string).split(',')[1]);
+          reader.onerror = () => reject(new Error("Failed to read file"));
           reader.readAsDataURL(file);
         });
         const base64Data = await base64Promise;
-
-        // Compute image hash for duplicate detection
         const imageHash = await computeImageHash(base64Data);
         
-        // Check if we've seen this image before (Global DB or current batch)
         const dbExisting = await findByImageHash(imageHash);
         const batchExisting = processedHashesInBatch.get(imageHash);
         const existingItem = batchExisting || dbExisting;
         
-        let aiData;
+        let aiData: any;
         let isDupe = false;
         
         if (existingItem) {
-          // Duplicate found! Use existing data
           console.log(`Duplicate detected: ${existingItem.title}`);
+          showToast(`♻️ Duplicate: "${existingItem.title}" already in inventory`);
           aiData = {
             title: existingItem.title,
             type: existingItem.type,
             year: existingItem.year,
             notes: `[Duplicate] ${existingItem.notes || ''}`,
-            confidence: existingItem.confidence
+            confidence: existingItem.confidence,
+            condition_estimate: existingItem.condition_estimate || '',
+            raw_metadata: existingItem.raw_metadata || {}
           };
           isDupe = true;
           
-          if (existingItem.id && !batchExisting) { // Only update DB if it's from global DB
+          if (existingItem.id && !batchExisting) {
             await updateInventoryItem(existingItem.id, {
               last_seen: new Date().toISOString(),
               times_scanned: (existingItem.times_scanned || 1) + 1
             });
           }
         } else {
-          // New image - AI Analyze
-          aiData = await analyzeImage(base64Data, aiKeys);
+          // NEW: Try server-side processing first (survives tab close)
+          // But skip if server already failed for this batch
+          let serverResult = null;
+          if (user && isServerProcessingAvailable(user.uid) && !serverFailedForBatch) {
+            try {
+              if (i === 0) showToast('☁️ Processing in cloud (survives tab close)');
+              console.log('🌐 Attempting server-side processing...');
+              const queueItemId = await uploadToQueue(user.uid, batchId, file.name, targetBoxId, base64Data);
+              serverResult = await waitForItem(user.uid, queueItemId, 30000); // 30s timeout for first
+              if (!serverResult) {
+                serverFailedForBatch = true; // Disable server for rest of batch
+                showToast('📱 Server busy, using local AI');
+              }
+            } catch (e) {
+              console.warn('Server processing failed, falling back to local:', e);
+              serverFailedForBatch = true; // Disable server for rest of batch
+            }
+          }
           
-          // Generate real thumbnail
+          // Use server result OR fall back to local AI
+          if (serverResult) {
+            aiData = serverResult;
+            console.log('✅ Used server-side result');
+          } else {
+            // FALLBACK: Local AI processing (always works)
+            incrementUsage(aiKeys.openai ? 'openai' : (aiKeys.gemini ? 'gemini' : 'claude'));
+            aiData = await analyzeImage(base64Data, aiKeys);
+            console.log('📱 Used local AI processing');
+          }
+          
+          const photoMeta = await extractPhotoMetadata(file);
           const thumbnail = await generateThumbnail(`data:image/jpeg;base64,${base64Data}`);
+          
           const inventoryData = {
             image_hash: imageHash,
             title: aiData.title,
@@ -286,31 +571,49 @@ function App() {
             last_seen: new Date().toISOString(),
             times_scanned: 1,
             thumbnail: thumbnail,
-            box_id: boxId || 'Uncategorized'
+            box_id: targetBoxId,
+            condition_estimate: aiData.condition_estimate || '',
+            raw_metadata: {
+              ...(aiData.raw_metadata || {}),
+              photo_metadata: photoMeta,
+              system_info: {
+                original_filename: file.name,
+                file_size: file.size,
+                last_modified: new Date(file.lastModified).toISOString(),
+                batch_id: batchId,
+                captured_at: new Date().toISOString()
+              }
+            }
           };
           await addToInventory(inventoryData);
           processedHashesInBatch.set(imageHash, inventoryData);
-          
           if (user) syncInventoryToCloud(user.uid, inventoryData);
         }
-        
+
         const item: CatalogItem = {
-          id: Date.now() + i,
-          batch_id: batchId, // Added for cloud sync
+          id: queueId,
+          batch_id: batchId,
           filename: file.name,
-          box_id: boxId || 'Uncategorized',
-          ...aiData,
+          box_id: targetBoxId,
+          title: aiData.title,
+          type: aiData.type,
+          year: aiData.year || '',
+          notes: aiData.notes || '',
+          confidence: aiData.confidence,
           processed_at: new Date().toISOString(),
-          image_data: `data:image/jpeg;base64,${base64Data}`
+          image_data: `data:image/jpeg;base64,${base64Data}`,
+          status: 'completed',
+          condition_estimate: aiData.condition_estimate || '',
+          raw_metadata: aiData.raw_metadata || {}
         };
 
         results.push(item);
+        setItems(prev => [...prev, item]);
 
-        // Save Item to DB immediately (resume support)
         const itemRecord = {
           batch_id: batchId,
           filename: file.name,
-          box_id: boxId || 'Uncategorized',
+          box_id: targetBoxId,
           title: aiData.title,
           type: aiData.type,
           year: aiData.year || '',
@@ -319,19 +622,16 @@ function App() {
           processed_at: item.processed_at,
           image_data: base64Data,
           status: 'completed' as const,
-          image_hash: imageHash
+          image_hash: imageHash,
+          condition_estimate: aiData.condition_estimate || '',
+          raw_metadata: aiData.raw_metadata || {}
         };
         await saveItem(itemRecord);
+        if (user) syncItemToCloud(user.uid, itemRecord);
 
-        // Sync item to cloud
-        if (user) {
-          syncItemToCloud(user.uid, itemRecord);
-        }
-
-        // Update batch progress in DB (for resume)
         const batchUpdate = {
           batch_id: batchId,
-          box_id: boxId || 'Uncategorized',
+          box_id: targetBoxId,
           total_images: totalFiles,
           processed: i + 1,
           failed: 0,
@@ -339,28 +639,24 @@ function App() {
           status: 'processing' as const
         };
         await saveBatch(batchUpdate);
-        
-        // Sync to cloud
-        if (user) {
-          syncBatchToCloud(user.uid, batchUpdate);
-        }
+        if (user) syncBatchToCloud(user.uid, batchUpdate);
 
         setProgress(prev => ({ ...prev, current: i + 1 }));
+        setProcessingQueue(prev => prev.map(p => p.id === queueId ? { ...p, status: 'completed' } : p));
         
-        // Rate limiting: add delay between API calls (not after last item, not for dupes)
-        if (i < files.length - 1 && !isDupe) {
+        if (i < filesToProcess.length - 1 && !isDupe) {
           await new Promise(resolve => setTimeout(resolve, DELAY_MS));
         }
 
       } catch (err: any) {
-        console.error("Processing error:", err);
+        console.error(`Batch item error [${queueId}]:`, err);
+        setProcessingQueue(prev => prev.map(p => p.id === queueId ? { ...p, status: 'failed', error_message: err.message } : p));
       }
     }
 
-    // Update Batch in DB
     const finalBatch = {
       batch_id: batchId,
-      box_id: boxId || 'Uncategorized',
+      box_id: targetBoxId,
       total_images: totalFiles,
       processed: results.length,
       failed: totalFiles - results.length,
@@ -368,89 +664,191 @@ function App() {
       status: 'completed' as const
     };
     await saveBatch(finalBatch);
-    
-    // Sync final batch to cloud
-    if (user) {
-      syncBatchToCloud(user.uid, finalBatch);
-    }
+    if (user) syncBatchToCloud(user.uid, finalBatch);
 
-    setItems(results);
     setFiles([]);
     setProcessing(false);
     loadBatchHistory();
   };
+  const resumeBatch = async (batch: any) => {
+    const batchId = batch.batch_id;
+    const targetBoxId = batch.box_id;
+    const allItems = await getBatchItems(batchId);
+    const pendingItems = allItems.filter(item => item.status === 'pending');
+    
+    if (pendingItems.length === 0) {
+      const finalBatch = { ...batch, status: 'completed' as const };
+      await saveBatch(finalBatch);
+      if (user) syncBatchToCloud(user.uid, finalBatch);
+      await loadBatch(batchId);
+      return;
+    }
 
-  const handleInventoryItemClick = async (item: InventoryItem) => {
-    const fullItem = await getLatestItemByHash(item.image_hash);
-    if (fullItem) {
-      // Convert to CatalogItem for the detail view
-      setSelectedItem({
-        ...fullItem,
-        image_data: fullItem.image_data.toString().startsWith('data:') 
-          ? fullItem.image_data 
-          : `data:image/jpeg;base64,${fullItem.image_data}`
-      } as any);
-    } else {
-      // Fallback: Create a mock CatalogItem using the info we have
-      setSelectedItem({
-        id: item.id || 0,
-        batch_id: 'inventory',
-        filename: 'inventory_item.jpg',
-        box_id: item.box_id,
-        title: item.title,
-        type: item.type,
-        year: item.year,
-        notes: item.notes,
-        confidence: item.confidence,
-        processed_at: item.last_seen,
-        image_data: item.thumbnail || '', // Detail view handles base64
-        status: 'completed'
-      });
+    setProcessing(true);
+    setCurrentView('progress');
+    setBatchStartTime(new Date());
+    setProgress({ current: allItems.length - pendingItems.length, total: allItems.length, currentFilename: '' });
+    
+    // Pre-populate queue with status
+    const initialQueue: ItemStatus[] = allItems.map(item => ({
+      id: item.id!,
+      filename: item.filename,
+      status: item.status
+    }));
+    setProcessingQueue(initialQueue);
+
+    const DELAY_MS = 1500;
+
+    for (let i = 0; i < pendingItems.length; i++) {
+      const itemRecord = pendingItems[i];
+      const queueId = itemRecord.id!;
+      
+      setProgress(prev => ({ ...prev, currentFilename: itemRecord.filename }));
+      setProcessingQueue(prev => prev.map(p => p.id === queueId ? { ...p, status: 'processing' } : p));
+
+      try {
+        const base64Data = typeof itemRecord.image_data === 'string' 
+          ? itemRecord.image_data 
+          : await new Promise<string>((resolve) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve((reader.result as string).split(',')[1]);
+              reader.readAsDataURL(itemRecord.image_data as Blob);
+            });
+
+        // Compute hash
+        const imageHash = await computeImageHash(base64Data);
+        
+        // Extract EXIF from blob/base64
+        let photoMeta = {};
+        try {
+          const arrayBuffer = typeof itemRecord.image_data === 'string' 
+            ? Uint8Array.from(atob(itemRecord.image_data), c => c.charCodeAt(0)).buffer
+            : await (itemRecord.image_data as Blob).arrayBuffer();
+          
+          photoMeta = await extractFromBuffer(arrayBuffer);
+        } catch (e) {
+          console.warn('Resume metadata extract failed', e);
+        }
+
+        // AI Analyze
+        incrementUsage(aiKeys.openai ? 'openai' : (aiKeys.gemini ? 'gemini' : 'claude'));
+        const aiData = await analyzeImage(base64Data, aiKeys);
+        
+        const thumbnail = await generateThumbnail(`data:image/jpeg;base64,${base64Data}`);
+        
+        // Update Inventory
+        const inventoryData = {
+          image_hash: imageHash,
+          title: aiData.title,
+          type: aiData.type,
+          year: aiData.year || '',
+          notes: aiData.notes || '',
+          confidence: aiData.confidence,
+          first_seen: new Date().toISOString(),
+          last_seen: new Date().toISOString(),
+          times_scanned: 1,
+          thumbnail: thumbnail,
+          box_id: targetBoxId,
+          condition_estimate: aiData.condition_estimate || '',
+          raw_metadata: {
+            ...(aiData.raw_metadata || {}), // Defensive spread
+            photo_metadata: photoMeta,
+            system_info: {
+              original_filename: itemRecord.filename,
+              batch_id: batchId,
+              resumed_at: new Date().toISOString()
+            }
+          }
+        };
+        await addToInventory(inventoryData);
+        if (user) syncInventoryToCloud(user.uid, inventoryData);
+
+        // Update Item Record
+        const updatedItem = {
+          ...itemRecord,
+          ...aiData,
+          status: 'completed' as const,
+          image_hash: imageHash,
+          condition_estimate: aiData.condition_estimate || '',
+          raw_metadata: inventoryData.raw_metadata
+        };
+        await updateItem(queueId, updatedItem);
+        if (user) syncItemToCloud(user.uid, updatedItem);
+
+        setProgress(prev => ({ ...prev, current: prev.current + 1 }));
+        setProcessingQueue(prev => prev.map(p => p.id === queueId ? { ...p, status: 'completed' } : p));
+        
+        if (i < pendingItems.length - 1) await new Promise(r => setTimeout(r, DELAY_MS));
+
+      } catch (err: any) {
+        console.error("Resume error:", err);
+        setProcessingQueue(prev => prev.map(p => p.id === queueId ? { ...p, status: 'failed', error_message: err.message } : p));
+      }
+    }
+
+    // Finalize Batch
+    const finalBatch = {
+      ...batch,
+      processed: allItems.length,
+      status: 'completed' as const
+    };
+    await saveBatch(finalBatch);
+    if (user) syncBatchToCloud(user.uid, finalBatch);
+    
+    setProcessing(false);
+    loadBatchHistory();
+  };
+
+
+
+  const handleRetryAI = async (item: CatalogItem) => {
+    if (!item.image_data) return;
+    
+    // Extract base64
+    const base64 = item.image_data.toString().includes('base64,') 
+      ? item.image_data.toString().split('base64,')[1] 
+      : item.image_data.toString();
+
+    // Re-run Analysis
+    incrementUsage(aiKeys.openai ? 'openai' : (aiKeys.gemini ? 'gemini' : 'claude'));
+    const aiData = await analyzeImage(base64, aiKeys);
+    
+    // Construct updates
+    const updatedFields = {
+      title: aiData.title,
+      type: aiData.type,
+      year: aiData.year,
+      notes: aiData.notes,
+      confidence: aiData.confidence
+    };
+
+    // Update Local State (Immediate Feedback)
+    setSelectedItem(prev => prev ? { ...prev, ...updatedFields } : null);
+    setItems(prev => prev.map(i => i.id === item.id ? { ...i, ...updatedFields } : i));
+
+    // Update DBs
+    if (item.id) {
+      await updateItem(item.id, updatedFields);
+      // Sync item to cloud
+      if (user) syncItemToCloud(user.uid, { ...item, ...updatedFields } as any);
+    }
+    
+    // Update Inventory if linked
+    if ((item as any).image_hash) {
+      const invItem = await findByImageHash((item as any).image_hash);
+      if (invItem && invItem.id) {
+        await updateInventoryItem(invItem.id, {
+          title: aiData.title,
+          type: aiData.type,
+          year: aiData.year || '',
+          notes: aiData.notes || '',
+          confidence: aiData.confidence,
+          last_seen: new Date().toISOString()
+        });
+      }
     }
   };
 
-  // ========== DATA LOADING ==========
-  const loadBatchHistory = async (limit = 10) => {
-    const localBatches = await getBatches(limit);
-    const batchesWithThumbs = await Promise.all(localBatches.map(async (b) => {
-      const items = await getBatchItems(b.batch_id);
-      const firstItem = items.find(i => i.image_data);
-      return {
-        batch_id: b.batch_id,
-        box_id: b.box_id,
-        total_images: b.total_images,
-        processed: b.processed,
-        failed: b.failed,
-        created_at: b.created_at,
-        thumbnail: firstItem ? (typeof firstItem.image_data === 'string' ? firstItem.image_data : undefined) : undefined
-      };
-    }));
-    setBatches(batchesWithThumbs);
-  };
-
-  const loadBatch = async (batchId: string) => {
-    const batchItems = await getBatchItems(batchId);
-    setItems(batchItems.map(item => ({
-      id: item.id,
-      batch_id: item.batch_id,
-      filename: item.filename,
-      box_id: item.box_id,
-      title: item.title,
-      type: item.type,
-      year: item.year,
-      notes: item.notes,
-      confidence: item.confidence,
-      processed_at: item.processed_at,
-      image_data: typeof item.image_data === 'string' ? item.image_data : undefined,
-      status: item.status
-    })));
-    setCurrentView('home');
-  };
-
-  const handleStartNew = () => {
-    setItems([]);
-    setBoxId('');
-  };
 
   // ========== EDIT & DELETE ==========
   const handleEditItem = async (updatedItem: CatalogItem) => {
@@ -463,7 +861,9 @@ function App() {
         title: updatedItem.title,
         type: updatedItem.type,
         year: updatedItem.year || '',
-        notes: updatedItem.notes || ''
+        notes: updatedItem.notes || '',
+        box_id: updatedItem.box_id,
+        comps_quote: updatedItem.comps_quote
       };
       await updateItem(updatedItem.id, updates);
       
@@ -479,7 +879,8 @@ function App() {
           notes: updatedItem.notes || '',
           confidence: updatedItem.confidence,
           processed_at: updatedItem.processed_at,
-          status: 'completed'
+          status: 'completed',
+          comps_quote: updatedItem.comps_quote
         });
       }
     }
@@ -596,13 +997,35 @@ function App() {
         <CameraCapture 
           initialBoxId={boxId} 
           onExit={() => setShowCameraFullscreen(false)} 
-          onBatchComplete={loadBatchHistory} 
+          onFilesCaptured={(files, capturedBoxId) => {
+            setShowCameraFullscreen(false);
+            processBatch(files, capturedBoxId);
+          }}
           standalone={true}
         />
       )}
 
       {/* Navbar */}
-      <Navbar onMenuClick={() => setShowMenu(!showMenu)} />
+      <Navbar 
+        onMenuClick={() => setShowMenu(!showMenu)} 
+        currentView={currentView}
+        onBack={() => setCurrentView('home')}
+      />
+      
+      {/* Status Bar */}
+      {appStatus !== 'ready' && (
+        <div style={{
+          padding: '8px 16px',
+          fontSize: '12px',
+          fontWeight: 600,
+          textAlign: 'center',
+          backgroundColor: appStatus === 'error' ? '#ef4444' : appStatus === 'syncing' ? '#f59e0b' : '#22c55e',
+          color: 'white',
+          transition: 'all 0.3s ease'
+        }}>
+          {statusMessage}
+        </div>
+      )}
 
       {/* Resume Prompt Modal */}
       {showResumePrompt && incompleteBatch && (
@@ -621,7 +1044,7 @@ function App() {
                 className="btn-seamless btn-primary"
                 onClick={async () => {
                   // Load the incomplete batch
-                  await loadBatch(incompleteBatch.batch_id);
+                  await resumeBatch(incompleteBatch);
                   setShowResumePrompt(false);
                 }}
                 style={{ flex: 1 }}
@@ -674,9 +1097,29 @@ function App() {
                 cursor: 'pointer'
               }}
             >
-              {view === 'home' ? '📦 Catalog' : view === 'history' ? '📚 History' : view === 'inventory' ? '📋 Inventory' : '⚙️ Settings'}
+              {view === 'home' ? '📦 Catalog' : view === 'history' ? '📚 History' : view === 'inventory' ? '📋 Inventory' : view === 'progress' ? '⏳ Progress' : '⚙️ Settings'}
             </button>
           ))}
+          {/* Show Progress option when actively processing */}
+          {processing && (
+            <button
+              onClick={() => { setCurrentView('progress'); setShowMenu(false); }}
+              style={{
+                display: 'block',
+                width: '100%',
+                padding: '12px 20px',
+                border: 'none',
+                background: '#FEF3C7',
+                textAlign: 'left',
+                fontSize: '14px',
+                fontWeight: 700,
+                color: '#92400E',
+                cursor: 'pointer'
+              }}
+            >
+              ⏳ View Progress ({progress.current}/{progress.total})
+            </button>
+          )}
         </div>
       )}
 
@@ -735,6 +1178,63 @@ function App() {
                 >
                   🛑 Cancel
                 </button>
+                
+                {/* Live Processed Items */}
+                {items.length > 0 && (
+                  <div style={{ marginTop: '20px' }}>
+                    <h4 style={{ fontSize: '14px', color: 'var(--text-secondary)', margin: '0 0 12px' }}>
+                      Processed ({items.length})
+                    </h4>
+                    <div className="grid-cols-3" style={{ gap: '8px' }}>
+                      {items.map(item => (
+                        <div 
+                          key={item.id}
+                          onClick={() => setSelectedItem(item)}
+                          style={{
+                            position: 'relative',
+                            background: 'var(--card-bg)',
+                            borderRadius: '8px',
+                            overflow: 'hidden',
+                            cursor: 'pointer',
+                            aspectRatio: '1'
+                          }}
+                        >
+                          <img 
+                            src={item.image_data || getPlaceholderForType(item.type)} 
+                            alt={item.title}
+                            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                          />
+                          {item.notes?.includes('[Duplicate]') && (
+                            <span style={{
+                              position: 'absolute',
+                              top: '4px',
+                              right: '4px',
+                              background: '#f59e0b',
+                              color: 'white',
+                              fontSize: '9px',
+                              padding: '2px 6px',
+                              borderRadius: '4px',
+                              fontWeight: 700
+                            }}>DUP</span>
+                          )}
+                          {item.title === 'Manual Entry Required' && (
+                            <span style={{
+                              position: 'absolute',
+                              top: '4px',
+                              left: '4px',
+                              background: '#ef4444',
+                              color: 'white',
+                              fontSize: '9px',
+                              padding: '2px 6px',
+                              borderRadius: '4px',
+                              fontWeight: 700
+                            }}>NEEDS AI</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -745,7 +1245,7 @@ function App() {
                   boxId={boxId}
                   onBoxIdChange={setBoxId}
                   onFilesSelected={setFiles}
-                  onStartCataloging={processBatch}
+                  onStartCataloging={() => processBatch()}
                   isProcessing={processing}
                   selectedCount={files.length}
                 />
@@ -856,6 +1356,143 @@ function App() {
           </div>
         )}
 
+        {/* PROGRESS QUEUE VIEW */}
+        {currentView === 'progress' && (
+          <div style={{ padding: '20px' }}>
+            <h2 style={{ fontFamily: 'Outfit, sans-serif', marginBottom: '16px' }}>Processing Queue</h2>
+            
+            {processingQueue.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-state-icon">✅</div>
+                <p className="empty-state-text">Queue is empty. Everything processed!</p>
+                <button className="btn-seamless btn-primary" onClick={() => setCurrentView('home')} style={{ marginTop: '16px' }}>
+                  Back to Dashboard
+                </button>
+              </div>
+            ) : (
+              <div className="card" style={{ padding: '16px' }}>
+                <div style={{ marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontWeight: 700, color: 'var(--text-main)' }}>
+                    {processing ? 'Running...' : 'Finished'}
+                  </span>
+                  <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                    {processingQueue.filter(i => i.status === 'completed').length} / {processingQueue.length} Completed
+                  </span>
+                </div>
+                
+                {/* Re-use ImageProgressList but possibly bigger styling if needed, currently it's compact */}
+                <ImageProgressList items={processingQueue} />
+                
+                {!processing && (
+                  <button 
+                    className="btn-seamless btn-primary" 
+                    onClick={() => {
+                      setProcessingQueue([]);
+                      loadBatchHistory();
+                      setCurrentView('home'); 
+                    }}
+                    style={{ marginTop: '20px', width: '100%' }}
+                  >
+                    Clear & Go Home
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* INVENTORY VIEW */}
+        {currentView === 'inventory' && (
+          <div className="card" style={{ margin: '16px', padding: '20px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h2 style={{ fontFamily: 'Outfit, sans-serif', fontSize: '22px', fontWeight: 800, margin: 0 }}>🗄️ Inventory</h2>
+              <button className="btn-seamless btn-ghost" onClick={() => loadInventory(true)} style={{ padding: '8px 12px' }}>
+                🔄 Refresh
+              </button>
+            </div>
+
+            {inventory.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-state-icon">📋</div>
+                <p className="empty-state-text">No items in inventory yet. Start cataloging to build your collection.</p>
+              </div>
+            ) : (
+              <>
+                <div style={{ marginBottom: '16px', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <label htmlFor="sort-inventory" style={{ fontSize: '13px', color: 'var(--text-secondary)', fontWeight: 600 }}>Sort by:</label>
+                  <select
+                    id="sort-inventory"
+                    value={inventorySort}
+                    onChange={(e) => setInventorySort(e.target.value as InventorySortOption)}
+                    style={{
+                      padding: '6px 10px',
+                      borderRadius: '6px',
+                      border: '1px solid #E5E7EB',
+                      fontSize: '13px',
+                      backgroundColor: 'white',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <option value="title-asc">Title (A-Z)</option>
+                    <option value="title-desc">Title (Z-A)</option>
+                    <option value="year-asc">Year (Oldest First)</option>
+                    <option value="year-desc">Year (Newest First)</option>
+                    <option value="box_id-asc">Box ID (A-Z)</option>
+                    <option value="box_id-desc">Box ID (Z-A)</option>
+                    <option value="created_at-desc">Date Added (Newest First)</option>
+                    <option value="created_at-asc">Date Added (Oldest First)</option>
+                  </select>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {inventory.map((item, idx) => (
+                    <div 
+                      key={item.id || idx} 
+                      className="card hover-scale" 
+                      onClick={() => handleInventoryItemClick(item)}
+                      style={{ 
+                        padding: '12px', 
+                        display: 'flex', 
+                        gap: '12px', 
+                        cursor: 'pointer',
+                        border: '1px solid #F1F5F9',
+                        transition: 'all 0.2s ease'
+                      }}
+                    >
+                      <div style={{ 
+                        width: '64px', 
+                        height: '64px', 
+                        borderRadius: '12px', 
+                        backgroundColor: '#F3F4F6', 
+                        overflow: 'hidden',
+                        flexShrink: 0,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}>
+                        {item.thumbnail ? (
+                          <img 
+                            src={item.thumbnail.startsWith('data:') ? item.thumbnail : `data:image/jpeg;base64,${item.thumbnail}`} 
+                            alt={item.title} 
+                            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                          />
+                        ) : (
+                          <span style={{ fontSize: '20px' }}>📦</span>
+                        )}
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-main)', marginBottom: '4px' }}>{item.title}</div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                          {item.type} {item.year && `(${item.year})`} - Box: {item.box_id}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {/* SETTINGS VIEW */}
         {currentView === 'settings' && (
           <div className="card" style={{ margin: '16px', padding: '20px' }}>
@@ -865,16 +1502,28 @@ function App() {
               margin: '0 0 8px',
               color: 'var(--text-main)'
             }}>
-              AI Provider Keys
+              Settings
             </h2>
             <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '20px' }}>
               Keys are saved locally on your device. The app tries each provider in order.
             </p>
             
-            <div style={{ marginBottom: '16px' }}>
-              <label style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: '6px' }}>
-                GEMINI API KEY (Recommended)
-              </label>
+            <details style={{ 
+                background: '#F9FAFB', 
+                border: '1px solid #E5E7EB', 
+                borderRadius: '8px', 
+                padding: '12px',
+                marginBottom: '20px'
+            }}>
+                <summary style={{ fontSize: '14px', fontWeight: 600, cursor: 'pointer', color: 'var(--primary)' }}>
+                    🔧 Advanced: API Keys & Diagnostics
+                </summary>
+                
+                <div style={{ marginTop: '16px' }}>
+                    <div style={{ marginBottom: '16px' }}>
+                    <label style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: '6px' }}>
+                        GEMINI API KEY (Recommended)
+                    </label>
               <input 
                 type="password" 
                 value={aiKeys.gemini} 
@@ -897,18 +1546,91 @@ function App() {
               />
             </div>
             
-            <div style={{ marginBottom: '24px' }}>
-              <label style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: '6px' }}>
-                CLAUDE API KEY (Optional)
+            <div style={{ marginBottom: '24px', background: 'var(--canvas-bg)', padding: '16px', borderRadius: '12px', border: '1px solid #E5E7EB' }}>
+              <h3 style={{ fontSize: '14px', fontWeight: 700, margin: '0 0 12px' }}>📊 AI Usage & Cost Estimate</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div style={{ padding: '8px', background: 'white', borderRadius: '8px', border: '1px solid #F1F5F9' }}>
+                  <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Gemini (Mostly Free)</div>
+                  <div style={{ fontSize: '16px', fontWeight: 700 }}>{aiUsage.gemini} <small style={{ fontSize: '10px', color: '#059669' }}>LIMITS APPLY</small></div>
+                </div>
+                <div style={{ padding: '8px', background: 'white', borderRadius: '8px', border: '1px solid #F1F5F9' }}>
+                  <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>OpenAI (Paid)</div>
+                  <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>OpenAI (Paid)</div>
+                  <div style={{ fontSize: '16px', fontWeight: 700 }}>{aiUsage.openai} <small style={{ fontSize: '10px', color: '#DC2626' }}>~${(aiUsage.openai * 0.01).toFixed(2)}</small></div>
+                </div>
+              </div>
+              <button 
+                onClick={() => setAiUsage({ gemini: 0, openai: 0, claude: 0 })}
+                style={{ marginTop: '12px', fontSize: '11px', color: '#94A3B8', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
+              >
+                Reset Counters
+              </button>
+            </div>
+            
+            <div style={{ borderTop: '1px solid #E5E7EB', paddingTop: '20px', marginBottom: '24px' }}>
+              <label style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginBottom: '8px' }}>
+                📝 Developer & Workflow Notes
               </label>
-              <input 
-                type="password" 
-                value={aiKeys.claude} 
-                onChange={e => updateKey('claude', e.target.value)} 
-                placeholder="sk-ant-..."
-                style={{ fontFamily: 'monospace', fontSize: '13px' }}
+              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+                Keep track of bugs, desired workflows, and future ideas here. Auto-saves locally.
+              </p>
+              <textarea 
+                value={devNotes}
+                onChange={e => {
+                    setDevNotes(e.target.value);
+                    saveDevNotes(e.target.value);
+                }}
+                placeholder="Record bugs, workflow ideas, and future features here..."
+                style={{ 
+                  width: '100%', 
+                  minHeight: '150px',
+                  padding: '12px',
+                  borderRadius: '8px',
+                  border: '1px solid #E5E7EB',
+                  fontSize: '14px',
+                  fontFamily: 'inherit',
+                  resize: 'vertical',
+                  background: '#F9FAFB'
+                }}
               />
             </div>
+
+            <div style={{ marginTop: '24px', paddingTop: '20px', borderTop: '1px solid #E5E7EB' }}>
+               <h3 style={{ fontSize: '14px', fontWeight: 700, color: '#DC2626', marginBottom: '12px' }}>
+                 Danger Zone
+               </h3>
+               <button 
+                  onClick={async () => {
+                      if (window.confirm("Are you sure? This will delete all LOCAL data and reload. (Cloud data is safe)")) {
+                          localStorage.clear();
+                          const { deleteDB } = await import('idb');
+                          await deleteDB('vintage-cataloger-db');
+                          if ('serviceWorker' in navigator) {
+                              const registrations = await navigator.serviceWorker.getRegistrations();
+                              for(let registration of registrations) {
+                                  await registration.unregister();
+                              }
+                          }
+                          window.location.reload();
+                      }
+                  }}
+                  style={{
+                      width: '100%',
+                      padding: '12px',
+                      background: '#FEF2F2',
+                      color: '#DC2626',
+                      border: '1px solid #FECACA',
+                      borderRadius: '8px',
+                      fontWeight: 700,
+                      cursor: 'pointer'
+                  }}
+               >
+                   ☢️ Force Clear Cache & Reset
+               </button>
+            </div>
+            
+            </div> {/* End of inner content div */}
+            </details> {/* End of Advanced Section */}
 
             <div style={{ borderTop: '1px solid #E5E7EB', paddingTop: '20px' }}>
               <h3 style={{ fontSize: '14px', fontWeight: 700, marginBottom: '12px' }}>
@@ -977,85 +1699,6 @@ function App() {
           </div>
         )}
 
-        {/* INVENTORY VIEW */}
-        {currentView === 'inventory' && (
-          <div style={{ padding: '16px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-              <h2 style={{ fontFamily: 'Outfit, sans-serif', fontSize: '20px', margin: 0 }}>
-                📋 All Unique Items ({inventory.length})
-              </h2>
-              <button className="btn-seamless btn-ghost" onClick={() => loadInventory(true)} style={{ padding: '8px 12px' }}>
-                🔄 Refresh
-              </button>
-            </div>
-            {inventory.length === 0 ? (
-              <div className="empty-state">
-                <div className="empty-state-icon">📋</div>
-                <p className="empty-state-text">No items in inventory yet. Start cataloging to build your collection.</p>
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {inventory.map((item, idx) => (
-                  <div 
-                    key={item.id || idx} 
-                    className="card hover-scale" 
-                    onClick={() => handleInventoryItemClick(item)}
-                    style={{ 
-                      padding: '12px', 
-                      display: 'flex', 
-                      gap: '12px', 
-                      cursor: 'pointer',
-                      border: '1px solid #F1F5F9',
-                      transition: 'all 0.2s ease'
-                    }}
-                  >
-                    <div style={{ 
-                      width: '64px', 
-                      height: '64px', 
-                      borderRadius: '12px', 
-                      backgroundColor: '#F3F4F6', 
-                      overflow: 'hidden',
-                      flexShrink: 0,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center'
-                    }}>
-                      {item.thumbnail ? (
-                        <img 
-                          src={item.thumbnail.startsWith('data:') ? item.thumbnail : `data:image/jpeg;base64,${item.thumbnail}`} 
-                          alt={item.title} 
-                          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                        />
-                      ) : (
-                        <span style={{ fontSize: '20px' }}>📦</span>
-                      )}
-                    </div>
-                    <div style={{ flex: 1 }}>
-                      <h4 style={{ margin: '0 0 4px', fontSize: '15px', fontWeight: 700, color: 'var(--text-main)' }}>{item.title}</h4>
-                      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' }}>
-                        {item.year && <span className="badge" style={{ fontSize: '10px', padding: '2px 8px' }}>📅 {item.year}</span>}
-                        {item.type && <span className="badge" style={{ fontSize: '10px', padding: '2px 8px', background: '#F1F5F9', color: '#64748B' }}>📁 {item.type}</span>}
-                        <span className="badge" style={{ fontSize: '10px', padding: '2px 8px', background: '#DBEAFE', color: '#1E40AF' }}>🔄 {item.times_scanned}x</span>
-                        <span className="badge" style={{ fontSize: '10px', padding: '2px 8px', background: '#F0FDF4', color: '#166534' }}>⭐ {item.confidence}</span>
-                      </div>
-                      <p style={{ fontSize: '11px', color: 'var(--text-secondary)', margin: '0 0 4px', fontStyle: 'italic' }}>
-                        "{item.notes?.length > 100 ? item.notes.substring(0, 100) + '...' : item.notes}"
-                      </p>
-                      <p style={{ fontSize: '10px', color: '#94A3B8', margin: 0, fontWeight: 500 }}>
-                        Box: <strong>{item.box_id}</strong> • Last seen {new Date(item.last_seen).toLocaleDateString()}
-                      </p>
-                    </div>
-                    <div style={{ alignSelf: 'center', color: '#CBD5E1' }}>
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="m9 18 6-6-6-6"/>
-                      </svg>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
       </main>
 
       {/* Detail Modal */}
@@ -1065,6 +1708,7 @@ function App() {
           onClose={() => setSelectedItem(null)}
           onSave={handleEditItem}
           onDelete={handleDeleteItem}
+          onRetry={handleRetryAI}
         />
       )}
 
@@ -1092,6 +1736,58 @@ function App() {
       >
         📷
       </button>
+      
+      {/* Floating Progress Pill - Shown when processing but not on progress view */}
+      {processing && currentView !== 'progress' && (
+        <button
+          onClick={() => setCurrentView('progress')}
+          style={{
+            position: 'fixed',
+            top: '70px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            background: 'linear-gradient(135deg, #6366f1 0%, #a855f7 100%)',
+            color: 'white',
+            padding: '10px 20px',
+            borderRadius: '20px',
+            fontSize: '13px',
+            fontWeight: 700,
+            border: 'none',
+            boxShadow: '0 4px 12px rgba(99, 102, 241, 0.4)',
+            cursor: 'pointer',
+            zIndex: 100,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            animation: 'pulse 2s infinite'
+          }}
+        >
+          <span style={{ fontSize: '16px' }}>⏳</span>
+          Processing {progress.current}/{progress.total} • Tap to View
+        </button>
+      )}
+
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div style={{
+          position: 'fixed',
+          bottom: '100px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          backgroundColor: 'rgba(0,0,0,0.85)',
+          color: 'white',
+          padding: '12px 24px',
+          borderRadius: '12px',
+          fontSize: '14px',
+          fontWeight: 600,
+          zIndex: 200,
+          animation: 'slideUp 0.3s ease',
+          maxWidth: '90%',
+          textAlign: 'center'
+        }}>
+          {toastMessage}
+        </div>
+      )}
     </div>
   );
 }

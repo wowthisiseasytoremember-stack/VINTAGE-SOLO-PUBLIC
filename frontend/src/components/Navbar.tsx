@@ -3,9 +3,13 @@ import LoginButton from './LoginButton';
 
 interface NavbarProps {
   onMenuClick?: () => void;
+  currentView?: string;
+  onBack?: () => void;
 }
 
-const Navbar: React.FC<NavbarProps> = ({ onMenuClick }) => {
+const Navbar: React.FC<NavbarProps> = ({ onMenuClick, currentView, onBack }) => {
+  const showBackButton = currentView && currentView !== 'home';
+  
   return (
     <nav style={{
       display: 'flex',
@@ -15,17 +19,39 @@ const Navbar: React.FC<NavbarProps> = ({ onMenuClick }) => {
       background: 'var(--card-surface)',
       borderBottom: '1px solid rgba(0, 0, 0, 0.05)'
     }}>
-      {/* Logo */}
+      {/* Left Side: Back Button or Logo */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-        <span style={{ fontSize: '20px' }}>📦</span>
-        <span style={{
-          fontFamily: 'Outfit, sans-serif',
-          fontWeight: 800,
-          fontSize: '18px',
-          color: 'var(--text-main)'
-        }}>
-          Vintage Solo
-        </span>
+        {showBackButton ? (
+          <button 
+            onClick={onBack}
+            style={{
+              background: 'none',
+              border: 'none',
+              padding: '8px 12px',
+              cursor: 'pointer',
+              fontSize: '16px',
+              fontWeight: 700,
+              color: 'var(--primary)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}
+          >
+            ← Home
+          </button>
+        ) : (
+          <>
+            <span style={{ fontSize: '20px' }}>📦</span>
+            <span style={{
+              fontFamily: 'Outfit, sans-serif',
+              fontWeight: 800,
+              fontSize: '18px',
+              color: 'var(--text-main)'
+            }}>
+              Vintage Solo
+            </span>
+          </>
+        )}
       </div>
 
       {/* Right side */}

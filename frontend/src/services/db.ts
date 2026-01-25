@@ -14,6 +14,9 @@ export interface InventoryItem {
   times_scanned: number;
   thumbnail?: string; // Small base64 for display
   box_id: string;
+  comps_quote?: string;
+  condition_estimate?: string;
+  raw_metadata?: Record<string, any>;
 }
 
 interface VintageDB extends DBSchema {
@@ -41,26 +44,56 @@ interface VintageDB extends DBSchema {
       type: string;
       year: string;
       notes: string;
+      developer_notes?: string; // New field for dev notes
       confidence: string;
       processed_at: string;
       image_data: Blob | string;
       status: 'pending' | 'processing' | 'completed' | 'failed';
       image_hash?: string; // Link to inventory
+      comps_quote?: string;
+      saved_comps?: string; // New field for saved comps JSON/String
+      condition_estimate?: string;
+      raw_metadata?: Record<string, any>;
     };
     indexes: { 'by-batch': string; 'by-hash': string };
   };
   inventory: {
     key: number;
     value: InventoryItem;
-    indexes: { 'by-hash': string };
+    indexes: { 'by-hash': string; 'by-date': string };
   };
 }
 
+// Cross-tab coordination to prevent upgrade hangs
+const dbChannel = new BroadcastChannel('vintage_db_sync');
+
 let dbPromise: Promise<IDBPDatabase<VintageDB>>;
 
+dbChannel.onmessage = async (event) => {
+  if (event.data.type === 'FORCE_CLOSE_DB') {
+    console.warn("⚠️ Received database update signal. Closing connection to allow upgrade...");
+    if (dbPromise) {
+      const db = await dbPromise;
+      db.close();
+      // Optional: Auto-reload to pick up new schema
+      // window.location.reload(); 
+      // Better: Let the user know, or just close silently so the other tab works.
+      // User asked to "exit out of all other instances".
+      // We'll close the DB so the *active* tab works. The *background* tabs will become disconnected.
+      // That satisfies "current instance is functional".
+    }
+  }
+};
+
 export const initDB = async (retryCount = 0) => {
+  // Idempotent check: If DB is already opening/open, return existing promise
+  // Only bypass this if we are intentionally retrying (retryCount > 0)
+  if (dbPromise && retryCount === 0) {
+    return dbPromise;
+  }
+
   try {
-    dbPromise = openDB<VintageDB>('vintage-cataloger-db', 3, {
+    dbPromise = openDB<VintageDB>('vintage-cataloger-db', 5, {
       upgrade(db, oldVersion, newVersion, tx) {
         try {
           console.log(`DB Upgrade: v${oldVersion} -> v${newVersion}`);
@@ -74,30 +107,42 @@ export const initDB = async (retryCount = 0) => {
           }
           
           if (oldVersion < 2) {
-            // Check if store exists to be safe
             if (!db.objectStoreNames.contains('inventory')) {
               const inventoryStore = db.createObjectStore('inventory', { keyPath: 'id', autoIncrement: true });
               inventoryStore.createIndex('by-hash', 'image_hash', { unique: true });
             }
           }
 
-          // Version 3: image_hash index on items
           if (oldVersion < 3) {
             const itemStore = tx.objectStore('items');
             if (!itemStore.indexNames.contains('by-hash')) {
               itemStore.createIndex('by-hash', 'image_hash');
             }
           }
+
+          if (oldVersion < 4) {
+            const invStore = tx.objectStore('inventory');
+            if (!invStore.indexNames.contains('by-date')) {
+              invStore.createIndex('by-date', 'last_seen');
+            }
+          }
+
+          if (oldVersion < 5) {
+             // Schema v5 adds fields to 'items' which is fine (no index needed)
+             console.log("Upgrading to v5: Added developer_notes and saved_comps support");
+          }
         } catch (err) {
           console.error("Critical Schema Upgrade Error:", err);
-          throw err; // Abort transaction to trigger recovery
+          throw err;
         }
       },
       blocked() {
-        console.warn("DB Upgrade Blocked: Close other tabs!");
+        console.warn("DB Upgrade Blocked. Broadcasting closure request to other tabs...");
+        // Signal other tabs to close their connections
+        dbChannel.postMessage({ type: 'FORCE_CLOSE_DB' });
       },
       blocking() {
-        console.warn("DB Blocking: Reloading...");
+        console.warn("DB Blocking an upgrade. Closing connection...");
         dbPromise.then(db => db.close());
       },
       terminated() {
@@ -198,7 +243,8 @@ export const getLatestItemByHash = async (hash: string) => {
 // ========== INVENTORY OPERATIONS ==========
 export const addToInventory = async (item: Omit<InventoryItem, 'id'>) => {
   const db = await dbPromise;
-  return await db.add('inventory', item as InventoryItem);
+  // Use put (upsert) instead of add (insert only) to prevent ConstraintErrors during sync
+  return await db.put('inventory', item as InventoryItem);
 };
 
 export const updateInventoryItem = async (id: number, updates: Partial<InventoryItem>) => {
@@ -214,11 +260,38 @@ export const findByImageHash = async (hash: string): Promise<InventoryItem | und
   return await db.getFromIndex('inventory', 'by-hash', hash);
 };
 
-export const getAllInventory = async (limit = 50, lastKey?: number): Promise<InventoryItem[]> => {
+export const getAllInventory = async (limit = 50, lastKey?: string, sort: string = 'created_at-desc'): Promise<InventoryItem[]> => {
   const db = await dbPromise;
-  const range = lastKey ? IDBKeyRange.lowerBound(lastKey, true) : null;
-  // Get items by key (insertion order)
-  return await db.getAll('inventory', range, limit);
+  
+  // If we are sorting by date (default), we can use the index efficiently
+  if (sort === 'created_at-desc' || sort === 'created_at-asc') {
+    const tx = db.transaction('inventory', 'readonly');
+    const index = tx.objectStore('inventory').index('by-date');
+    const direction = sort === 'created_at-desc' ? 'prev' : 'next';
+    const range = lastKey ? (direction === 'prev' ? IDBKeyRange.upperBound(lastKey, false) : IDBKeyRange.lowerBound(lastKey, false)) : null;
+    let cursor = await index.openCursor(range, direction);
+    
+    const results: InventoryItem[] = [];
+    if (lastKey && cursor && cursor.key === lastKey) cursor = await cursor.continue();
+
+    while (cursor && results.length < limit) {
+      results.push(cursor.value);
+      cursor = await cursor.continue();
+    }
+    return results;
+  }
+
+  // For other sorts, we fetch all and sort in memory (fine for small/medium local collections)
+  const all = await db.getAll('inventory');
+  const [field, order] = sort.split('-');
+  
+  return all.sort((a: any, b: any) => {
+    const valA = (a[field] || '').toString().toLowerCase();
+    const valB = (b[field] || '').toString().toLowerCase();
+    if (valA < valB) return order === 'asc' ? -1 : 1;
+    if (valA > valB) return order === 'asc' ? 1 : -1;
+    return 0;
+  }).slice(0, limit);
 };
 
 export const getInventoryCount = async (): Promise<number> => {

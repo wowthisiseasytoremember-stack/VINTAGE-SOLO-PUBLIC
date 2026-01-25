@@ -1,6 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { saveItem, saveBatch } from '../services/db';
 
 // Auto-detect API URL based on environment
 const getApiUrl = () => {
@@ -15,7 +14,8 @@ const API_URL = getApiUrl();
 interface CameraCaptureProps {
   initialBoxId?: string;
   onExit: () => void;
-  onBatchComplete?: () => void;
+  onBatchComplete?: () => void; // Legacy
+  onFilesCaptured?: (files: File[], boxId: string) => void;
   standalone?: boolean;
 }
 
@@ -27,7 +27,7 @@ interface QueueItem {
   error?: string;
 }
 
-const CameraCapture: React.FC<CameraCaptureProps> = ({ initialBoxId = '', onExit, onBatchComplete, standalone = true }) => {
+const CameraCapture: React.FC<CameraCaptureProps> = ({ initialBoxId = '', onExit, onBatchComplete, onFilesCaptured, standalone = true }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -107,45 +107,19 @@ const CameraCapture: React.FC<CameraCaptureProps> = ({ initialBoxId = '', onExit
     setIsProcessingBatch(true);
 
     try {
-      // Create a new batch for this session
-      const newBatchId = `local-cam-${Date.now()}`;
-      
-      // Save items to IndexedDB
-      for (const item of queue) {
-        const reader = new FileReader();
-        const base64Promise = new Promise<string>((resolve) => {
-          reader.onload = () => resolve((reader.result as string).split(',')[1]);
-          reader.readAsDataURL(item.file);
-        });
-        const base64 = await base64Promise;
-
-        await saveItem({
-          batch_id: newBatchId,
-          filename: item.filename,
-          box_id: boxId || 'CAMERA-SESSION',
-          title: '', type: 'other', year: '', notes: '', confidence: '',
-          processed_at: new Date().toISOString(),
-          image_data: base64,
-          status: 'pending' // App.tsx will pick this up
-        });
+      if (onFilesCaptured) {
+        // Convert Blobs to Files
+        const files = queue.map(item => new File([item.file], item.filename, { type: 'image/jpeg' }));
+        onFilesCaptured(files, boxId || 'CAMERA-SESSION');
+        // Parent will close the camera
+      } else {
+        // Fallback or legacy behavior (should not happen in new flow)
+        console.warn("No capture handler provided to CameraCapture");
+        if (onBatchComplete) onBatchComplete();
+        onExit(); 
       }
-
-      // Initial Batch Record
-      await saveBatch({
-        batch_id: newBatchId,
-        box_id: boxId || 'CAMERA-SESSION',
-        total_images: queue.length,
-        processed: 0,
-        failed: 0,
-        created_at: new Date().toISOString(),
-        status: 'pending'
-      });
-
-      if (onBatchComplete) onBatchComplete(); // Triggers App.tsx to start processing
-      onExit();
     } catch (err) {
-      console.error("Batch save failed:", err);
-      // Even if specific save fails, try to exit
+      console.error("Batch handoff failed:", err);
       onExit();
     }
   };
@@ -255,25 +229,46 @@ const CameraCapture: React.FC<CameraCaptureProps> = ({ initialBoxId = '', onExit
       {!showReview && (
         <div style={bottomBarStyle}>
           <div style={statsBarStyle}>
-            <div style={{ color: '#fff', fontSize: '14px', fontWeight: 700 }}>CAPTURED: {queue.length}</div>
+            <div style={{ color: '#fff', fontSize: '16px', fontWeight: 800 }}>📂 BOX: {boxId || 'No Name'} • {queue.length} PHOTOS</div>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '30px', width: '100%' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '30px', width: '100%', marginBottom: '10px' }}>
             <div 
               onClick={() => queue.length > 0 && setShowReview(true)}
-              style={{ width: '50px', height: '50px', borderRadius: '50%', backgroundColor: 'rgba(255,255,255,0.15)', overflow: 'hidden', border: '2px solid #fff', cursor: 'pointer' }}
+              style={{ width: '64px', height: '64px', borderRadius: '16px', backgroundColor: 'rgba(255,255,255,0.15)', overflow: 'hidden', border: '3px solid #fff', cursor: 'pointer' }}
             >
-              {lastPreview && <img src={lastPreview} alt="Preview" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />}
+              {lastPreview ? <img src={lastPreview} alt="Preview" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '24px' }}>🖼️</div>}
             </div>
-            <button onClick={capturePhoto} disabled={isCapturing} style={shutterButtonStyle}>
-              <div style={{ width: '60px', height: '60px', borderRadius: '50%', backgroundColor: '#fff', transform: isCapturing ? 'scale(0.8)' : 'scale(1)', transition: 'transform 0.1s' }} />
+            
+            <button onClick={capturePhoto} disabled={isCapturing} style={{ ...shutterButtonStyle, width: '90px', height: '90px' }}>
+              <div style={{ width: '65px', height: '65px', borderRadius: '50%', backgroundColor: '#fff', transform: isCapturing ? 'scale(0.8)' : 'scale(1)', transition: 'transform 0.1s' }} />
             </button>
-            <button onClick={() => setFacingMode(prev => prev === 'user' ? 'environment' : 'user')} style={{ width: '50px', height: '50px', borderRadius: '50%', backgroundColor: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.3)', color: '#fff' }}>🔄</button>
+
+            <button onClick={() => setFacingMode(prev => prev === 'user' ? 'environment' : 'user')} style={{ width: '64px', height: '64px', borderRadius: '16px', backgroundColor: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.3)', color: '#fff', fontSize: '24px' }}>🔄</button>
           </div>
 
-          <button onClick={queue.length > 0 ? () => setShowReview(true) : onExit} style={exitButtonStyle}>
-            {queue.length > 0 ? `Review & Process (${queue.length})` : 'Exit Viewfinder'}
-          </button>
+          <div style={{ width: '100%', display: 'flex', gap: '12px', padding: '0 10px' }}>
+            <button 
+              onClick={onExit} 
+              style={{ ...exitButtonStyle, flex: 1, backgroundColor: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.2)' }}
+            >
+              Cancel
+            </button>
+            <button 
+              onClick={queue.length > 0 ? handleFinishSession : undefined} 
+              disabled={queue.length === 0}
+              style={{ 
+                ...exitButtonStyle, 
+                flex: 2, 
+                backgroundColor: queue.length > 0 ? '#22c55e' : 'rgba(255,255,255,0.05)', 
+                color: '#fff', 
+                fontSize: '16px',
+                opacity: queue.length > 0 ? 1 : 0.3
+              }}
+            >
+              {queue.length > 0 ? `✨ SAVE & IDENTIFY (${queue.length})` : 'Take some photos first'}
+            </button>
+          </div>
         </div>
       )}
     </div>

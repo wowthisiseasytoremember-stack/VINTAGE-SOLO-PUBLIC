@@ -16,11 +16,10 @@ function Show-Menu {
     Write-Host "================================" -ForegroundColor Cyan
 }
 
-# Check for Admin Privileges
+# Check for Admin Privileges - Self-Elevate if needed
 if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    Write-Host "⚠️  Please run this script as ADMINISTRATOR!" -ForegroundColor Red
-    Write-Host "Right-click -> Run as Administrator"
-    Start-Sleep -Seconds 5
+    Write-Host "Requesting Administrator privileges..." -ForegroundColor Yellow
+    Start-Process powershell.exe "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     Exit
 }
 

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#667eea"/>
+      <stop offset="100%" style="stop-color:#764ba2"/>
+    </linearGradient>
+  </defs>
+  <rect width="200" height="200" fill="url(#grad)"/>
+  <g fill="none" stroke="rgba(255,255,255,0.9)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Comic book icon -->
+    <rect x="55" y="60" width="90" height="80" rx="4"/>
+    <line x1="100" y1="60" x2="100" y2="140"/>
+    <path d="M70 85 L85 75 L100 85"/>
+    <path d="M115 85 L130 75 L145 85"/>
+    <circle cx="77" cy="100" r="8"/>
+    <circle cx="123" cy="100" r="8"/>
+    <path d="M75 120 Q100 130 125 120"/>
+  </g>
+  <text x="100" y="170" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-family="system-ui" font-size="12" font-weight="500">Comic Book</text>
+</svg>

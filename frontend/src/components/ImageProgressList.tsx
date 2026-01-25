@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 
-interface ItemStatus {
+export interface ItemStatus {
   id: number;
   filename: string;
   status: 'pending' | 'processing' | 'completed' | 'failed';

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#667eea"/>
+      <stop offset="100%" style="stop-color:#764ba2"/>
+    </linearGradient>
+  </defs>
+  <rect width="200" height="200" fill="url(#grad)"/>
+  <g fill="none" stroke="rgba(255,255,255,0.9)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Box/package icon for collectibles -->
+    <path d="M100 45 L150 70 L150 130 L100 155 L50 130 L50 70 Z"/>
+    <line x1="100" y1="95" x2="100" y2="155"/>
+    <line x1="50" y1="70" x2="100" y2="95"/>
+    <line x1="150" y1="70" x2="100" y2="95"/>
+    <!-- Star sparkle -->
+    <path d="M125 55 L128 62 L135 62 L130 67 L132 75 L125 70 L118 75 L120 67 L115 62 L122 62 Z" fill="rgba(255,255,255,0.7)"/>
+  </g>
+  <text x="100" y="180" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-family="system-ui" font-size="12" font-weight="500">Collectible</text>
+</svg>

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#11998e"/>
+      <stop offset="100%" style="stop-color:#38ef7d"/>
+    </linearGradient>
+  </defs>
+  <rect width="200" height="200" fill="url(#grad)"/>
+  <g fill="none" stroke="rgba(255,255,255,0.9)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Book with bookmark -->
+    <path d="M55 55 L55 145 Q55 150 60 150 L145 150 Q150 150 150 145 L150 65 Q150 60 145 60 L65 60"/>
+    <path d="M60 55 L60 145"/>
+    <path d="M70 60 L70 55 Q70 50 75 50 L80 50 Q85 50 85 55 L85 60"/>
+    <!-- Bookmark ribbon -->
+    <path d="M130 50 L130 80 L125 70 L120 80 L120 50" fill="rgba(255,255,255,0.4)"/>
+    <!-- Page lines -->
+    <line x1="75" y1="85" x2="135" y2="85"/>
+    <line x1="75" y1="100" x2="130" y2="100"/>
+    <line x1="75" y1="115" x2="120" y2="115"/>
+    <line x1="75" y1="130" x2="110" y2="130"/>
+  </g>
+  <text x="100" y="175" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-family="system-ui" font-size="12" font-weight="500">Book</text>
+</svg>

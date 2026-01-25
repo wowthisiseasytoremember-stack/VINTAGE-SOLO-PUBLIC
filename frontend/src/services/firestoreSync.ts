@@ -62,6 +62,11 @@ interface ItemData {
   processed_at: string;
   status: 'pending' | 'processing' | 'completed' | 'failed';
   image_hash?: string;
+  comps_quote?: string;
+  condition_estimate?: string;
+  raw_metadata?: Record<string, any>;
+  developer_notes?: string;
+  saved_comps?: string;
   // Note: image_data is NOT synced to cloud (too large)
 }
 
@@ -77,6 +82,9 @@ interface InventoryData {
   last_seen: string;
   times_scanned: number;
   box_id: string;
+  comps_quote?: string;
+  condition_estimate?: string;
+  raw_metadata?: Record<string, any>;
   // Note: thumbnail is NOT synced to cloud
 }
 
@@ -88,6 +96,7 @@ export interface UserSettings {
   };
   lastBoxId?: string;
   theme?: 'light' | 'dark';
+  dev_notes?: string;
 }
 
 // ========== SETTINGS (API KEYS) ==========
@@ -200,12 +209,23 @@ export async function syncItemToCloud(userId: string, item: ItemData): Promise<v
     const itemRef = doc(db, 'users', userId, 'items', itemId);
     
     // Don't sync image_data to cloud (too large)
-    const { image_data, ...itemWithoutImage } = item as any;
+    let { image_data, ...itemWithoutImage } = item as any;
     
-    await setDoc(itemRef, {
+    // 🛡️ Data Bomb Defense: Check for Firestore 1MB limit
+    let payload = {
       ...itemWithoutImage,
       syncedAt: new Date().toISOString()
-    });
+    };
+    
+    const size = new Blob([JSON.stringify(payload)]).size;
+    if (size > 950000) { // Safety margin (950KB)
+        console.warn(`⚠️ Item ${item.filename} exceeds 1MB cloud limit (${Math.round(size/1024)}KB). Stripping metadata.`);
+        // Strip metadata and potentially other large fields
+        const { raw_metadata, saved_comps, ...stripped } = itemWithoutImage;
+        payload = { ...stripped, syncedAt: new Date().toISOString(), notes: "Metadata stripped (too large)" };
+    }
+
+    await setDoc(itemRef, payload);
   } catch (error) {
     console.error('Failed to sync item:', error);
   }
@@ -248,11 +268,11 @@ export async function syncInventoryToCloud(userId: string, item: InventoryData):
   try {
     const invRef = doc(db, 'users', userId, 'inventory', item.image_hash);
     
-    // Don't sync thumbnail to cloud
-    const { thumbnail, ...itemWithoutThumb } = item as any;
+    // We NOW sync thumbnails because they are small (<5KB) and critical for UX
+    // const { thumbnail, ...itemWithoutThumb } = item as any;
     
     await setDoc(invRef, {
-      ...itemWithoutThumb,
+      ...item,
       syncedAt: new Date().toISOString()
     });
   } catch (error) {

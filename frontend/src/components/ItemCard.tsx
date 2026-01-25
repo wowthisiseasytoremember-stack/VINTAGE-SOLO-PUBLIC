@@ -14,6 +14,9 @@ export interface CatalogItem {
   processed_at: string;
   image_data?: string;
   status?: 'pending' | 'processing' | 'completed' | 'failed';
+  comps_quote?: string;
+  condition_estimate?: string;
+  raw_metadata?: Record<string, any>;
 }
 
 interface ItemCardProps {
@@ -35,19 +38,29 @@ const ItemCard: React.FC<ItemCardProps> = ({ item, onCardClick }) => {
           className="triage-card-image"
         />
       ) : (
-        <div 
-          className="triage-card-image" 
-          style={{ 
-            background: '#F3F4F6', 
-            display: 'flex', 
-            alignItems: 'center', 
-            justifyContent: 'center',
-            fontSize: '32px',
-            opacity: 0.3
-          }}
-        >
-          📷
-        </div>
+        <img 
+          src={(() => {
+            const typeMap: Record<string, string> = {
+              'comic book': '/placeholders/comic.svg',
+              'comic': '/placeholders/comic.svg',
+              'toy': '/placeholders/toy.svg',
+              'action figure': '/placeholders/toy.svg',
+              'figure': '/placeholders/toy.svg',
+              'card': '/placeholders/card.svg',
+              'trading card': '/placeholders/card.svg',
+              'vinyl': '/placeholders/vinyl.svg',
+              'record': '/placeholders/vinyl.svg',
+              'book': '/placeholders/book.svg',
+              'photo': '/placeholders/photo.svg',
+              'photograph': '/placeholders/photo.svg'
+            };
+            const lowerType = (item.type || '').toLowerCase();
+            return typeMap[lowerType] || '/placeholders/other.svg';
+          })()} 
+          alt={item.title}
+          className="triage-card-image"
+          style={{ objectFit: 'cover' }}
+        />
       )}
 
       {/* Footer */}
@@ -66,6 +79,15 @@ const ItemCard: React.FC<ItemCardProps> = ({ item, onCardClick }) => {
               📅 {item.year}
             </span>
           )}
+          {item.comps_quote && (
+            <span className="triage-card-badge" style={{ background: '#FEF3C7', color: '#92400E', fontWeight: 800 }}>
+              💰 ${item.comps_quote}
+            </span>
+          )}
+          {/* Mom-Proofing: Cloud Checkmark (Always green for simplicity if item exists) */}
+           <span className="triage-card-badge" style={{ background: '#ECFDF5', color: '#059669', borderColor: '#A7F3D0' }}>
+             ☁️ Saved
+           </span>
         </div>
       </div>
     </div>

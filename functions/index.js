@@ -94,3 +94,83 @@ function extractYearFromText(text) {
   const yearMatch = text.match(/\b(18|19|20)\d{2}\b/);
   return yearMatch ? yearMatch[0] : null;
 }
+
+/**
+ * Process Queue Item - Server-side batch processing
+ * Triggered when a new item is added to the processing queue
+ * This allows processing to continue even if the user closes the app
+ */
+exports.processQueueItem = functions.firestore
+  .document('users/{userId}/processingQueue/{itemId}')
+  .onCreate(async (snap, context) => {
+    const { userId, itemId } = context.params;
+    const data = snap.data();
+    
+    console.log(`Processing queue item ${itemId} for user ${userId}`);
+    
+    try {
+      const { base64Image, batchId, filename, boxId } = data;
+      
+      if (!base64Image) {
+        await snap.ref.update({ status: 'failed', error: 'No image data' });
+        return;
+      }
+      
+      // 1. Run Vision API (cost-effective first pass)
+      const [visionResult] = await client.annotateImage({
+        image: { content: base64Image },
+        features: [
+          { type: 'TEXT_DETECTION' },
+          { type: 'LABEL_DETECTION' }
+        ]
+      });
+      
+      const fullText = visionResult.fullTextAnnotation ? visionResult.fullTextAnnotation.text : '';
+      const labels = visionResult.labelAnnotations || [];
+      
+      // 2. Construct result
+      const result = {
+        title: extractTitleFromText(fullText) || (labels.length > 0 ? labels[0].description : 'Unknown Item'),
+        type: mapLabelsToType(labels),
+        year: extractYearFromText(fullText) || '',
+        notes: fullText.substring(0, 200),
+        confidence: `${Math.round((labels[0]?.score || 0.5) * 100)}%`,
+        raw_metadata: {
+          vision_text: fullText,
+          vision_labels: labels.map(l => ({ desc: l.description, score: l.score }))
+        }
+      };
+      
+      // 3. Save result to user's items collection
+      const itemRef = admin.firestore().doc(`users/${userId}/items/${batchId}_${filename.replace(/[^a-zA-Z0-9]/g, '_')}`);
+      await itemRef.set({
+        ...result,
+        batch_id: batchId,
+        filename: filename,
+        box_id: boxId,
+        processed_at: admin.firestore.FieldValue.serverTimestamp(),
+        status: 'completed'
+      });
+      
+      // 4. Update queue item status
+      await snap.ref.update({ 
+        status: 'completed', 
+        processedAt: admin.firestore.FieldValue.serverTimestamp() 
+      });
+      
+      // 5. Update batch progress
+      const batchRef = admin.firestore().doc(`users/${userId}/batches/${batchId}`);
+      await batchRef.update({
+        processed: admin.firestore.FieldValue.increment(1)
+      });
+      
+      console.log(`Successfully processed ${filename}`);
+      
+    } catch (error) {
+      console.error('Processing failed:', error);
+      await snap.ref.update({ 
+        status: 'failed', 
+        error: error.message 
+      });
+    }
+  });

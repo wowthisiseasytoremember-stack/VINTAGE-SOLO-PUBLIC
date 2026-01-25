@@ -5,6 +5,7 @@
   "dependencies": {
     "autoprefixer": "^10.4.16",
     "axios": "^1.6.2",
+    "exifreader": "^4.36.0",
     "firebase": "^12.8.0",
     "idb": "^8.0.3",
     "postcss": "^8.4.32",

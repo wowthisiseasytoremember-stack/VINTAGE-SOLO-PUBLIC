@@ -6,6 +6,8 @@ export interface AIResult {
   year: string;
   notes: string;
   confidence: string;
+  condition_estimate?: string;
+  raw_metadata?: Record<string, any>;
 }
 
 export type AIProvider = 'openai' | 'gemini' | 'claude';
@@ -18,17 +20,23 @@ export interface AIKeys {
 
 const PROMPT = `Identify this vintage object. Return ONLY a JSON object with: 
 "title" (brief name), 
-"type" (document, photo, postcard, book, other), 
-"year" (estimate if not clear, e.g. "c. 1920s"), 
+"type" (document, photo, postcard, book, toy, card, etc.), 
+"year" (estimate, e.g. "c. 1920s"), 
 "notes" (1-2 sentences context),
-"confidence" (percentage 0-100%).
-Be accurate as a cataloging expert.`;
+"confidence" (percentage 0-100%),
+"condition_estimate" (brief mention of visible wear),
+"raw_metadata" (an object with extra context like publisher, material, dimensions estimate, or specific markings if visible).
+Be accurate as a cataloging expert. Provide deep context in raw_metadata if possible.`;
 
 export async function analyzeImage(
   base64Image: string,
   keys: AIKeys,
   priority: AIProvider[] = ['gemini', 'openai', 'claude']
 ): Promise<AIResult> {
+  if (!base64Image || base64Image.length < 50) {
+    throw new Error("No image data provided for analysis");
+  }
+
   let lastError: any = null;
 
   // 1. VISION API FIRST PASS ("Sit on Top" Strategy)
@@ -53,24 +61,27 @@ export async function analyzeImage(
   });
 
   for (const provider of priority) {
-    const key = keys[provider];
+    let key = keys[provider];
     if (!key) {
       console.log(`Skipping ${provider} - no key configured`);
       continue;
     }
+    key = key.trim(); // 🟢 Fix for "Sticky Fingers" (Whitespace in Key)
 
     try {
       console.log(`Attempting analysis with ${provider.toUpperCase()}...`);
+      // Resize image before sending to AI (reduces upload size, speeds up requests)
+      const resizedImage = await resizeImageForAI(base64Image);
       let result;
       switch (provider) {
         case 'openai':
-          result = await callOpenAI(base64Image, key);
+          result = await callOpenAI(resizedImage, key);
           break;
         case 'gemini':
-          result = await callGemini(base64Image, key);
+          result = await callGemini(resizedImage, key);
           break;
         case 'claude':
-          result = await callClaude(base64Image, key);
+          result = await callClaude(resizedImage, key);
           break;
       }
       if (result) {
@@ -78,7 +89,7 @@ export async function analyzeImage(
         return result;
       }
     } catch (err) {
-      console.warn(`${provider} failed:`, err);
+      console.warn(`${provider} failed, trying next...`, err);
       lastError = err;
       // Continue to next provider
     }
@@ -90,9 +101,46 @@ export async function analyzeImage(
     title: "Manual Entry Required",
     type: "other",
     year: "Unknown",
-    notes: "AI analysis was unavailable (check keys/connectivity). Please edit this item.",
+    notes: `AI Analysis Failed: ${lastError?.message || 'Unknown error'}. Please retry later.`,
     confidence: "0%"
   };
+}
+
+// Resize image to reduce upload size (AI doesn't need HD)
+async function resizeImageForAI(base64Image: string, maxDimension = 800): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d')!;
+      
+      // Calculate new dimensions
+      let width = img.width;
+      let height = img.height;
+      if (width > height && width > maxDimension) {
+        height = (height / width) * maxDimension;
+        width = maxDimension;
+      } else if (height > maxDimension) {
+        width = (width / height) * maxDimension;
+        height = maxDimension;
+      }
+      
+      canvas.width = width;
+      canvas.height = height;
+      ctx.drawImage(img, 0, 0, width, height);
+      
+      // Get resized base64 (without data URL prefix)
+      const resized = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+      console.log(`Image resized: ${img.width}x${img.height} → ${Math.round(width)}x${Math.round(height)}`);
+      resolve(resized);
+    };
+    // 🛡️ Trojan Horse Defense: Fail fast if it's not a valid image
+    img.onerror = () => {
+        console.warn("Image load failed - possibly corrupted or not an image file.");
+        reject(new Error("Invalid image data"));
+    };
+    img.src = base64Image.startsWith('data:') ? base64Image : `data:image/jpeg;base64,${base64Image}`;
+  });
 }
 
 // Helper for Network Resilience
@@ -143,17 +191,41 @@ async function callOpenAI(base64Content: string, apiKey: string): Promise<AIResu
     throw new Error(`OpenAI error: ${response.status} ${response.statusText} - ${errorBody}`);
   }
   const data = await response.json();
-  return JSON.parse(data.choices[0].message.content);
+  return cleanAIResponse(data.choices[0].message.content);
 }
 
 async function callGemini(base64Content: string, apiKey: string): Promise<AIResult> {
-  // Try multiple Gemini models in case one is unavailable
-  const models = [
-    'gemini-1.5-flash',
-    'gemini-1.5-pro', 
-    'gemini-pro-vision',
-    'gemini-pro'
-  ];
+  // First, discover available models
+  let models: string[] = [];
+  try {
+    console.log('Discovering available Gemini models...');
+    const listResponse = await fetchWithTimeout(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`,
+      { method: 'GET' }
+    );
+    if (listResponse.ok) {
+      const listData = await listResponse.json();
+      // Filter for models that support generateContent and preferably vision
+      models = (listData.models || [])
+        .filter((m: any) => m.supportedGenerationMethods?.includes('generateContent'))
+        .map((m: any) => m.name.replace('models/', ''));
+      console.log('Available Gemini models:', models);
+    }
+  } catch (err) {
+    console.warn('Failed to list models, using fallback:', err);
+  }
+  
+  // Fallback to known models if discovery failed
+  if (models.length === 0) {
+    models = [
+      'gemini-2.0-flash-exp',
+      'gemini-2.0-flash',
+      'gemini-1.5-flash',
+      'gemini-1.5-pro', 
+      'gemini-pro-vision',
+      'gemini-pro'
+    ];
+  }
   
   for (const model of models) {
     try {
@@ -182,7 +254,7 @@ async function callGemini(base64Content: string, apiKey: string): Promise<AIResu
       const data = await response.json();
       const text = data.candidates[0].content.parts[0].text;
       console.log(`Gemini ${model} succeeded!`);
-      return JSON.parse(text);
+      return cleanAIResponse(text);
     } catch (err) {
       console.warn(`Gemini ${model} failed:`, err);
       // Continue to next model
@@ -220,5 +292,24 @@ async function callClaude(base64Content: string, apiKey: string): Promise<AIResu
   const data = await response.json();
   // Claude returns content as an array of parts
   const text = data.content[0].text;
-  return JSON.parse(text);
+  return cleanAIResponse(text);
+}
+
+// Robust JSON Cleaner for AI responses
+function cleanAIResponse(text: string): any {
+  try {
+    // 1. Strip Markdown code blocks
+    let clean = text.replace(/```json\n?/g, '').replace(/```/g, '');
+    
+    // 2. Trim whitespace
+    clean = clean.trim();
+    
+    // 3. Attempt parse
+    return JSON.parse(clean);
+  } catch (e) {
+    console.error("JSON Parse Failed on:", text);
+    // Attempt relaxed parsing or partial recovery? 
+    // For now, simpler is better. If it fails, it fails, but we handled the markdown case.
+    throw new Error("Failed to parse AI JSON response");
+  }
 }

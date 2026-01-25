@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#a855f7"/>
+      <stop offset="100%" style="stop-color:#6366f1"/>
+    </linearGradient>
+  </defs>
+  <rect width="200" height="200" fill="url(#grad)"/>
+  <g fill="none" stroke="rgba(255,255,255,0.9)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Vinyl record -->
+    <circle cx="100" cy="95" r="55"/>
+    <circle cx="100" cy="95" r="45" stroke-opacity="0.5"/>
+    <circle cx="100" cy="95" r="35" stroke-opacity="0.3"/>
+    <circle cx="100" cy="95" r="15" fill="rgba(255,255,255,0.9)"/>
+    <circle cx="100" cy="95" r="5" fill="url(#grad)"/>
+  </g>
+  <text x="100" y="175" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-family="system-ui" font-size="12" font-weight="500">Vinyl Record</text>
+</svg>

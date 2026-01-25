@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f093fb"/>
+      <stop offset="100%" style="stop-color:#f5576c"/>
+    </linearGradient>
+  </defs>
+  <rect width="200" height="200" fill="url(#grad)"/>
+  <g fill="none" stroke="rgba(255,255,255,0.9)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Robot/Action figure icon -->
+    <rect x="75" y="50" width="50" height="35" rx="6"/>
+    <circle cx="90" cy="67" r="6"/>
+    <circle cx="110" cy="67" r="6"/>
+    <rect x="70" y="90" width="60" height="50" rx="4"/>
+    <line x1="70" y1="90" x2="55" y2="110"/>
+    <line x1="130" y1="90" x2="145" y2="110"/>
+    <line x1="85" y1="140" x2="80" y2="165"/>
+    <line x1="115" y1="140" x2="120" y2="165"/>
+    <rect x="85" y="105" width="30" height="15" rx="2" fill="rgba(255,255,255,0.3)"/>
+  </g>
+  <text x="100" y="185" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-family="system-ui" font-size="12" font-weight="500">Toy</text>
+</svg>
