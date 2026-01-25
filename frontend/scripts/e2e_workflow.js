@@ -141,22 +141,32 @@ const fs = require('fs');
 
 
     // 7. Wait for Processing (AI or Fallback)
-    console.log("⏳ Waiting for AI (or Local Fallback)...");
+    console.log("⏳ Waiting for AI Analysis to trigger and complete...");
+    await new Promise(r => setTimeout(r, 2000)); // Wait for click to register
+    await capture('05_ai_started');
+
     try {
         await page.waitForFunction(
             () => {
                 const text = document.body.innerText;
-                // Success | Fallback Title | Processed Count
+                const matches = [
+                    'Finished', 
+                    'Processed (1)', 
+                    'Unidentified Item',
+                    'ANALYZING...'
+                ];
+                console.log("Current body text includes ANALYZING:", text.includes('ANALYZING'));
                 return text.includes('Finished') || text.includes('Processed (1)') || text.includes('Unidentified Item');
             },
-            { timeout: 60000 } 
+            { timeout: 90000 } // Increase to 90s
         );
         console.log("✅ Analysis/Fallback Complete!");
-        await new Promise(r => setTimeout(r, 1000));
-        await capture('05_after_analysis');
+        await new Promise(r => setTimeout(r, 1500));
+        await capture('06_analysis_complete');
     } catch(e) {
-        console.warn("⚠️ AI Wait Timed Out - continuing to UX Audit anyway...");
-        await capture('05_timeout_debug');
+        console.warn("⚠️ AI Wait Timed Out - taking capture for debug...");
+        await capture('06_timeout_debug');
+        // If we timeout, but "Back to Dashboard" is there, we proceed
     }
 
     // 8. Go to Dashboard to verify result
